@@ -39,8 +39,8 @@ LOCAL_MONITORED_PORTS = [8080, 11434]
 REMOTE_MONITORED_PORTS = [8080, 11434]
 
 # SSH connections require this minimum duration before counting as active
-LOCAL_SSH_PORTS = [22]
-REMOTE_SSH_PORTS = [22]
+LOCAL_SSH_PORTS = []
+REMOTE_SSH_PORTS = []
 SSH_MIN_DURATION = 30.0   # seconds — prevents short scripts (git fetch, etc.) from triggering
 POLLING_INTERVAL = 5.0    # seconds
 ```
@@ -52,6 +52,18 @@ Just add its port to `LOCAL_MONITORED_PORTS` or `REMOTE_MONITORED_PORTS`:
 ```python
 LOCAL_MONITORED_PORTS = [8080, 11434, 5432]  # llama.cpp + Ollama + local PostgreSQL
 ```
+
+### Adding SSH support
+
+To enable wakelock for SSH sessions, add the SSH port (usually 22) to the SSH port lists:
+
+```python
+LOCAL_SSH_PORTS = [22]
+REMOTE_SSH_PORTS = [22]
+```
+
+> **Warning:** Before adding ports to `LOCAL_SSH_PORTS`, verify your incoming SSH TCP connection behavior. Many systems leave SSH sessions open indefinitely (depending on SSH and kernel TCP keepalive settings), which would prevent your machine from ever sleeping.
+
 
 ## Files
 
