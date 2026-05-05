@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Test: parse tcp_table_blob.bin and verify ESTABLISHED port 8001.
+"""Tests for llm_wakelock_windows TCP parsing and SSH tracking logic.
 
-Uses ctypes casting to match the production GetExtendedTcpTable parsing.
-The blob was captured with TCP_TABLE_MODULE_CONNECTIONS (type 7), so each
-row is 160 bytes (32 bytes of TCP fields + 128 bytes module padding).
-
-Run on Windows with the binary blob. Does not call iphlpapi at runtime.
+Part 1: parse_tcp_table_blob.bin — ctypes-based parsing of a captured
+         TCP table blob (no iphlpapi calls at runtime).
+Part 2: is_ssh_active — duration tracking, stale-entry pruning,
+         reconnect detection. Pure Python, no Windows dependencies.
 """
 
 import ctypes
+import os
 import socket
 import struct
 import sys
@@ -37,6 +37,7 @@ ROW_SIZE = 160   # MIB_TCPROW_MODULE size
 
 
 def _parse_tcp_table(buf, num_entries: int) -> list[dict]:
+    """Parse raw TCP buffer into structured connection data."""
     row_ptr = ctypes.cast(
         ctypes.addressof(buf) + HEADER_SIZE,
         ctypes.POINTER(MIB_TCPROW_MODULE),
@@ -60,6 +61,7 @@ def _parse_tcp_table(buf, num_entries: int) -> list[dict]:
 
 
 def parse_blob_file(path: str) -> list[dict]:
+    """Read and parse TCP table blob from given file path."""
     with open(path, "rb") as f:
         data = f.read()
     buf = ctypes.create_string_buffer(data, len(data))
@@ -68,6 +70,7 @@ def parse_blob_file(path: str) -> list[dict]:
 
 
 def print_summary(connections: list[dict]) -> None:
+    """Print formatted summary of TCP connections, focusing on ESTABLISHED state."""
     estab = [c for c in connections if c["state"] == MIB_TCP_STATE_ESTAB]
     print(f"Total rows parsed: {len(connections)}")
     print(f"ESTABLISHED connections: {len(estab)}")
@@ -82,18 +85,23 @@ def print_summary(connections: list[dict]) -> None:
 
 
 def main():
+    """Main entry point for processing TCP blob file and verifying monitored port."""
     path = sys.argv[1] if len(sys.argv) > 1 else "tcp_table_blob.bin"
+    if not os.path.exists(path):
+        print(f"SKIP: {path} not found — skipping blob test.")
+        return
     connections = parse_blob_file(path)
     print_summary(connections)
+    TEST_PORT = 8001
     found = any(
         c["state"] == MIB_TCP_STATE_ESTAB
-        and (c["local_port"] == 8001 or c["remote_port"] == 8001)
+        and (c["local_port"] == TEST_PORT or c["remote_port"] == TEST_PORT)
         for c in connections
     )
     if not found:
-        raise AssertionError("Port 8001 not found in ESTABLISHED connections")
+        raise AssertionError(f"Monitored port {TEST_PORT} not found in ESTABLISHED connections")
     print()
-    print("OK: Port 8001 confirmed in ESTABLISHED connections.")
+    print(f"OK: Monitored port {TEST_PORT} confirmed in ESTABLISHED connections.")
 
 
 if __name__ == "__main__":
