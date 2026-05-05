@@ -121,14 +121,29 @@ def is_monitored_active(connections):
 
 
 def is_ssh_active(connections, ssh_start_times):
+    """Checks if any SSH connections have been active for at least SSH_MIN_DURATION.
+
+    Tracks each connection by (pid, local_port, remote_port, remote_addr).
+    Prunes stale entries when a connection drops, so a reconnect starts a
+    fresh timer. Does not account for connection state changes beyond the
+    initial ESTABLISHED detection.
+    """
     now = time.time()
+    active_keys = set()
     for conn in connections:
         if conn["local_port"] in LOCAL_SSH_PORTS or conn["remote_port"] in REMOTE_SSH_PORTS:
-            key = (conn["pid"], conn["local_port"], conn["remote_port"])
+            # Include remote_addr in the key to distinguish SSH sessions to
+            # different hosts, even if they share the same port numbers.
+            key = (conn["pid"], conn["local_port"], conn["remote_port"], conn["remote_addr"])
+            active_keys.add(key)
             if key not in ssh_start_times:
                 ssh_start_times[key] = now
             elif now - ssh_start_times[key] >= SSH_MIN_DURATION:
                 return True
+    # Prune stale entries for connections that are no longer established
+    for key in list(ssh_start_times):
+        if key not in active_keys:
+            del ssh_start_times[key]
     return False
 
 
