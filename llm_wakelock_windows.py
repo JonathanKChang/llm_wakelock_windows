@@ -160,23 +160,24 @@ while True:
     # Get current connections
     connections = get_established_tcp_connections()
     active = is_monitored_active(connections) or is_ssh_active(connections, ssh_start_times)
+    now = datetime.datetime.now().isoformat()
 
     if active and not wakelock:
         acquire()
         # Print date/time and relevant connection info
-        now = datetime.datetime.now().isoformat()
-        relevant = [
-            conn for conn in connections
+        relevant_str = "\n".join([
+            str(conn) for conn in connections
             if conn["local_port"] in LOCAL_MONITORED_PORTS
                or conn["remote_port"] in REMOTE_MONITORED_PORTS
                or conn["local_port"] in LOCAL_SSH_PORTS
                or conn["remote_port"] in REMOTE_SSH_PORTS
-        ]
-        print(f"[{now}] Active connections: {relevant}")
+        ])
+        print(f"[{now}] Grabbing wakelock due to active connections: \n{relevant_str}")
         wakelock = True
 
     elif not active and wakelock:
         release()
+        print(f"[{now}] Releasing wakelock")
         wakelock = False
 
     time.sleep(POLLING_INTERVAL)
