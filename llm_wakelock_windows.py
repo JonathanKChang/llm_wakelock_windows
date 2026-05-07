@@ -59,7 +59,11 @@ def acquire():
 
 
 def release():
-    """Releases system wake lock."""
+    """Resets idle timer then releases system wake lock"""
+
+    # Pulse the wake-lock flag briefly to reset idle timer
+    ctypes.windll.kernel32.SetThreadExecutionState(ES_SYSTEM_REQUIRED)
+    
     ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
 
