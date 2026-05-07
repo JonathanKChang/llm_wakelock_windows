@@ -10,8 +10,7 @@ Common use cases include:
   - SSH session keep-alive
   - Any long-running service that should keep the machine awake
 
-Configuration is done by editing the port lists and duration thresholds
-near the top of this file.
+Configuration is done via `config.toml` in the same directory.
 """
 import sys
 import time
@@ -19,29 +18,39 @@ import ctypes
 import socket
 import struct
 import datetime
+import tomllib
+import os
+import pprint
 
 if sys.platform != "win32":
     print("Error: this script requires Windows", file=sys.stderr)
     sys.exit(1)
 
-# Ports to monitor for active connections.
-# Add or remove ports as needed for your services.
-# Defaults: 8080 (llama.cpp server), 11434 (Ollama)
-LOCAL_MONITORED_PORTS = [8080, 11434]
-REMOTE_MONITORED_PORTS = [8080, 11434]
-LOCAL_SSH_PORTS = []
-REMOTE_SSH_PORTS = []
-SSH_MIN_DURATION = 30.0
-POLLING_INTERVAL = 5.0
+# ── Configuration ──────────────────────────────────────────────────────────────
+# Defaults — override by placing config.toml next to this script.
+DEFAULTS = {
+    "local_monitored_ports": [8080, 11434],
+    "remote_monitored_ports": [8080, 11434],
+    "local_ssh_ports": [],
+    "remote_ssh_ports": [],
+    "ssh_min_duration": 30.0,
+    "polling_interval": 5.0,
+}
 
-# Startup: print configuration parameters
-print("Configuration:")
-print(f"LOCAL_MONITORED_PORTS={LOCAL_MONITORED_PORTS}")
-print(f"REMOTE_MONITORED_PORTS={REMOTE_MONITORED_PORTS}")
-print(f"LOCAL_SSH_PORTS={LOCAL_SSH_PORTS}")
-print(f"REMOTE_SSH_PORTS={REMOTE_SSH_PORTS}")
-print(f"SSH_MIN_DURATION={SSH_MIN_DURATION}")
-print(f"POLLING_INTERVAL={POLLING_INTERVAL}")
+_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml")
+with open(_config_path, "rb") as f:
+    user_cfg = tomllib.load(f)
+
+config = {**DEFAULTS, **user_cfg}
+
+LOCAL_MONITORED_PORTS = config["local_monitored_ports"]
+REMOTE_MONITORED_PORTS = config["remote_monitored_ports"]
+LOCAL_SSH_PORTS = config["local_ssh_ports"]
+REMOTE_SSH_PORTS = config["remote_ssh_ports"]
+SSH_MIN_DURATION = config["ssh_min_duration"]
+POLLING_INTERVAL = config["polling_interval"]
+
+pprint.pprint(config, sort_dicts=False)
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001

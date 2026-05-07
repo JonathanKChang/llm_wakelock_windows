@@ -26,43 +26,39 @@ A typical setup:
 
 ### Why the SSH minimum duration?
 
-The `SSH_MIN_DURATION` threshold (default: 30 seconds) prevents short-lived SSH connections from triggering the wakelock. For example, a `git fetch` over SSH typically completes in a few seconds — you don't want that to keep your machine awake. Only sustained SSH sessions will trigger the lock.
+The `ssh_min_duration` threshold (default: 30 seconds) prevents short-lived SSH connections from triggering the wakelock. For example, a `git fetch` over SSH typically completes in a few seconds — you don't want that to keep your machine awake. Only sustained SSH sessions will trigger the lock.
 
 ## Configuration
 
-Edit the port lists and thresholds near the top of `llm_wakelock_windows.py`:
+Copy `config.toml` from the script directory and edit it. The file ships with all defaults — uncomment or change values as needed.
 
-```python
-# Ports monitored with instant detection (any established connection counts)
-# Defaults: 8080 (llama.cpp server), 11434 (Ollama)
-LOCAL_MONITORED_PORTS = [8080, 11434]
-REMOTE_MONITORED_PORTS = [8080, 11434]
-
-# SSH connections require this minimum duration before counting as active
-LOCAL_SSH_PORTS = []
-REMOTE_SSH_PORTS = []
-SSH_MIN_DURATION = 30.0   # seconds — prevents short scripts (git fetch, etc.) from triggering
-POLLING_INTERVAL = 5.0    # seconds
+```toml
+local_monitored_ports = [8080, 11434]   # llama.cpp, Ollama
+remote_monitored_ports = [8080, 11434]
+local_ssh_ports = []
+remote_ssh_ports = []
+ssh_min_duration = 30.0   # seconds — prevents short scripts (git fetch, etc.) from triggering
+polling_interval = 5.0    # seconds
 ```
 
 ### Adding a new service
 
-Just add its port to `LOCAL_MONITORED_PORTS` or `REMOTE_MONITORED_PORTS`:
+Add its port to the monitored port lists:
 
-```python
-LOCAL_MONITORED_PORTS = [8080, 11434, 5432]  # llama.cpp + Ollama + local PostgreSQL
+```toml
+local_monitored_ports = [8080, 11434, 5432]  # llama.cpp + Ollama + local PostgreSQL
 ```
 
 ### Adding SSH support
 
-To enable wakelock for SSH sessions, add the SSH port (usually 22) to the SSH port lists:
+Enable wakelock for SSH sessions by setting the SSH port:
 
-```python
-LOCAL_SSH_PORTS = [22]
-REMOTE_SSH_PORTS = [22]
+```toml
+local_ssh_ports = [22]
+remote_ssh_ports = [22]
 ```
 
-> **Warning:** Before adding ports to `LOCAL_SSH_PORTS`, verify your incoming SSH TCP connection behavior. Many systems leave SSH sessions open indefinitely (depending on SSH and kernel TCP keepalive settings), which would prevent your machine from ever sleeping.
+> **Warning:** Before adding ports to `local_ssh_ports`, verify your incoming SSH TCP connection behavior. Many systems leave SSH sessions open indefinitely (depending on SSH and kernel TCP keepalive settings), which would prevent your machine from ever sleeping.
 
 
 ## Files
