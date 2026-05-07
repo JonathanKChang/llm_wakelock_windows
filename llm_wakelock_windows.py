@@ -32,7 +32,7 @@ REMOTE_MONITORED_PORTS = [8080, 11434]
 LOCAL_SSH_PORTS = []
 REMOTE_SSH_PORTS = []
 SSH_MIN_DURATION = 30.0
-POLLING_INTERVAL = 1.0
+POLLING_INTERVAL = 5.0
 
 # Startup: print configuration parameters
 print("Configuration:")
