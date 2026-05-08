@@ -228,4 +228,4 @@ def test_docker_handler_no_containers():
         config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0}
         manager = mod.WslDockerManager(config)
         assert manager.get_connections() == []
-        assert manager.unavailable is None  # no containers != unavailable
+        assert manager.unavailable is False  # no containers != unavailable

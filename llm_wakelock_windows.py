@@ -51,8 +51,7 @@ class TcpConnectionSource(Protocol):
     """Protocol for TCP connection sources (Windows and WSL)."""
 
     def get_connections(self) -> list[dict]: ...
-    @property
-    def unavailable(self) -> str | None: ...
+    unavailable: bool
 
 
 class TcpConnectionMonitor:
@@ -189,11 +188,7 @@ class WindowsTcpHandler:
 
     def __init__(self, config: dict) -> None:
         self._config = config
-        self._unavailable: str | None = None
-
-    @property
-    def unavailable(self) -> str | None:
-        return self._unavailable
+        self.unavailable: bool = False
 
     def get_connections(self) -> list[dict]:
         """Retrieve all established TCP connections from Windows iphlpapi."""
@@ -255,17 +250,13 @@ class WslTcpConnectionHandler:
 
     def __init__(self, config: dict, command: str) -> None:
         self._config = config
-        self._unavailable: str | None = None
+        self.unavailable: bool = False
         self._command = command
         self._process: subprocess.Popen | None = None
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
         self._warning_issued = False
         self._header_seen = False
-
-    @property
-    def unavailable(self) -> str | None:
-        return self._unavailable
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
         """Run a command inside WSL via wsl.exe using sh -c."""
@@ -359,8 +350,8 @@ class WslTcpConnectionHandler:
             self._process = self._start_subprocess()
             if self._process is None:
                 if not self._warning_issued:
-                    self._unavailable = "wsl.exe not available"
-                    print(f"[{self._unavailable}]")
+                    self.unavailable = True
+                    print("[wsl.exe not available]")
                     self._warning_issued = True
                 return []
 
@@ -377,8 +368,8 @@ class WslTcpConnectionHandler:
                 break
         if lines and not self._header_seen:
             if not self._warning_issued:
-                self._unavailable = "/proc/net/tcp missing header"
-                print(f"[{self._unavailable}]")
+                self.unavailable = True
+                print("[/proc/net/tcp missing header]")
                 self._warning_issued = True
             return []
 
@@ -399,8 +390,8 @@ class WslTcpHandler(WslTcpConnectionHandler):
         cmd = f"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done"
         super().__init__(config, cmd)
         if not self._wsl_available():
-            self._unavailable = "wsl.exe not reachable"
-            print(f"[{self._unavailable}]")
+            self.unavailable = True
+            print("[wsl.exe not reachable]")
 
     def _wsl_available(self) -> bool:
         """Check if wsl.exe is reachable."""
@@ -408,7 +399,7 @@ class WslTcpHandler(WslTcpConnectionHandler):
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from WSL /proc/net/tcp."""
-        if self._unavailable:
+        if self.unavailable:
             return []
         if not self._config["wsl_monitoring"]:
             return []
@@ -428,12 +419,12 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         self._container_id = short_id
         # Check docker accessibility
         if self._run_command(f"docker exec {short_id} echo ok", check=True) is None:
-            self._unavailable = f"docker container {short_id} not accessible"
-            print(f"[{self._unavailable}]")
+            self.unavailable = True
+            print(f"[docker container {short_id} not accessible]")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from Docker container."""
-        if self._unavailable:
+        if self.unavailable:
             return []
         conns = super().get_connections()
         for c in conns:
@@ -447,14 +438,10 @@ class WslDockerManager(TcpConnectionSource):
 
     def __init__(self, config: dict) -> None:
         self._config = config
-        self._unavailable: str | None = None
+        self.unavailable: bool = False
         self._container_handlers: list[WslDockerTcpHandler] = []
         self._warning_issued = False
         self._discover_containers()
-
-    @property
-    def unavailable(self) -> str | None:
-        return self._unavailable
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
         """Run a command inside WSL via wsl.exe using sh -c."""
@@ -478,8 +465,8 @@ class WslDockerManager(TcpConnectionSource):
         result = self._run_command("docker ps --format '{{.ID}}'", check=True)
         if result is None or result.returncode != 0:
             if not self._warning_issued:
-                self._unavailable = "docker not available in WSL"
-                print(f"[{self._unavailable}]")
+                self.unavailable = True
+                print("[docker not available in WSL]")
                 self._warning_issued = True
             return
         container_ids = [cid.strip() for cid in result.stdout.strip().split("\n") if cid.strip()]
@@ -492,7 +479,7 @@ class WslDockerManager(TcpConnectionSource):
 
     def get_connections(self) -> list[dict]:
         """Aggregate connections from all container handlers."""
-        if self._unavailable:
+        if self.unavailable:
             return []
         all_conns: list[dict] = []
         for handler in self._container_handlers:
