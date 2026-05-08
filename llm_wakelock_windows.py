@@ -364,20 +364,10 @@ with open(_config_path, "rb") as f:
     user_cfg = tomllib.load(f)
 
 config = {**DEFAULTS, **user_cfg}
-
-LOCAL_MONITORED_PORTS = config["local_monitored_ports"]
-REMOTE_MONITORED_PORTS = config["remote_monitored_ports"]
-LOCAL_SSH_PORTS = config["local_ssh_ports"]
-REMOTE_SSH_PORTS = config["remote_ssh_ports"]
-SSH_MIN_DURATION = config["ssh_min_duration"]
-POLLING_INTERVAL = config["polling_interval"]
-ENABLE_WSL_MONITORING = config["enable_wsl_monitoring"]
-
 pprint.pprint(config, sort_dicts=False)
 
 # ── Module-level monitor instance (for test backward compatibility) ─────────
 monitor = TcpConnectionMonitor(config)
-pprint.pprint(config, sort_dicts=False)
 
 
 # Thin wrappers for test backward compatibility (Phase 7 will remove these)
