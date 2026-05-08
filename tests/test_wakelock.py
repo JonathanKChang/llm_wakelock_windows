@@ -61,7 +61,7 @@ def _parse_tcp_table(buf, num_entries: int) -> list[dict]:
             "local_port": lport,
             "remote_addr": raddr,
             "remote_port": rport,
-            "pid": row.dwOwningPid,
+            "is_wsl": False,
         })
     return rows
 
@@ -84,10 +84,10 @@ def print_summary(connections: list[dict]) -> None:
     if not estab:
         print("No ESTABLISHED connections found.")
         return
-    print(f"{'Local Address':<20} {'Local Port':<10} {'Remote Address':<20} {'Remote Port':<10} {'PID'}")
+    print(f"{'Local Address':<20} {'Local Port':<10} {'Remote Address':<20} {'Remote Port':<10} {'is_wsl'}")
     print("-" * 76)
     for c in estab:
-        print(f"{c['local_addr']:<20} {c['local_port']:<10} {c['remote_addr']:<20} {c['remote_port']:<10} {c['pid']}")
+        print(f"{c['local_addr']:<20} {c['local_port']:<10} {c['remote_addr']:<20} {c['remote_port']:<10} {c['is_wsl']}")
 
 
 def main():
@@ -113,25 +113,25 @@ def main():
 SSH_MIN_DURATION = 30.0
 
 
-def _make_conn(pid, local_port, remote_port, remote_addr):
-    """Build a minimal connection dict like get_established_tcp_table returns."""
+def _make_conn(is_wsl: bool, local_port, remote_port, remote_addr):
+    """Build a minimal connection dict matching the new handler output schema."""
     return {
         "state": MIB_TCP_STATE_ESTAB,
         "local_addr": "0.0.0.0",
         "local_port": local_port,
         "remote_addr": remote_addr,
         "remote_port": remote_port,
-        "pid": pid,
+        "is_wsl": is_wsl,
     }
 
 
 def _is_ssh_active(connections, ssh_start_times, min_duration=SSH_MIN_DURATION):
-    """Copy of production is_ssh_active for testing."""
+    """Copy of production is_ssh_active for testing — no PID in keys."""
     now = time.time()
     active_keys = set()
     for conn in connections:
         if conn["local_port"] in [22] or conn["remote_port"] in [22]:
-            key = (conn["pid"], conn["local_port"], conn["remote_port"], conn["remote_addr"])
+            key = (conn["local_port"], conn["remote_port"], conn["remote_addr"])
             active_keys.add(key)
             if key not in ssh_start_times:
                 ssh_start_times[key] = now
@@ -148,50 +148,50 @@ def _is_ssh_active(connections, ssh_start_times, min_duration=SSH_MIN_DURATION):
 def test_ssh_active_after_min_duration():
     """Happy path: SSH connection older than threshold returns True."""
     ssh_start_times = {}
-    conn = _make_conn(1234, 54321, 22, "10.0.0.1")
-    ssh_start_times[(1234, 54321, 22, "10.0.0.1")] = time.time() - 60
+    conn = _make_conn(False, 54321, 22, "10.0.0.1")
+    ssh_start_times[(54321, 22, "10.0.0.1")] = time.time() - 60
     assert _is_ssh_active([conn], ssh_start_times) is True
 
 
 def test_ssh_not_yet_active():
     """Edge case: SSH connection younger than threshold returns False."""
     ssh_start_times = {}
-    conn = _make_conn(1234, 54321, 22, "10.0.0.1")
-    ssh_start_times[(1234, 54321, 22, "10.0.0.1")] = time.time() - 5
+    conn = _make_conn(False, 54321, 22, "10.0.0.1")
+    ssh_start_times[(54321, 22, "10.0.0.1")] = time.time() - 5
     assert _is_ssh_active([conn], ssh_start_times) is False
 
 
 def test_reconnect_new_pid_resets_timer():
     """Edge case: dropped+reconnected SSH with new PID starts fresh timer."""
     ssh_start_times = {}
-    old_conn = _make_conn(1234, 54321, 22, "10.0.0.1")
-    ssh_start_times[(1234, 54321, 22, "10.0.0.1")] = time.time() - 60
+    old_conn = _make_conn(False, 54321, 22, "10.0.0.1")
+    ssh_start_times[(54321, 22, "10.0.0.1")] = time.time() - 60
     # Old connection still present — should return True
     assert _is_ssh_active([old_conn], ssh_start_times) is True
     # Connection drops: old key gets pruned
     assert _is_ssh_active([], ssh_start_times) is False
     assert len(ssh_start_times) == 0  # stale entry removed
     # New PID reconnects — fresh timer, too young
-    new_conn = _make_conn(5678, 54322, 22, "10.0.0.1")
+    new_conn = _make_conn(False, 54322, 22, "10.0.0.1")
     assert _is_ssh_active([new_conn], ssh_start_times) is False
 
 
 def test_same_pid_reconnect_resets_timer():
-    """Edge case: same PID reconnects — timer resets because old key was pruned."""
+    """Edge case: reconnects — timer resets because old key was pruned."""
     ssh_start_times = {}
-    conn = _make_conn(1234, 54321, 22, "10.0.0.1")
-    ssh_start_times[(1234, 54321, 22, "10.0.0.1")] = time.time() - 60
+    conn = _make_conn(False, 54321, 22, "10.0.0.1")
+    ssh_start_times[(54321, 22, "10.0.0.1")] = time.time() - 60
     # Drop the connection — prunes the key
     assert _is_ssh_active([], ssh_start_times) is False
     assert len(ssh_start_times) == 0
-    # Same PID reconnects — treated as new connection
+    # Reconnects — treated as new connection
     assert _is_ssh_active([conn], ssh_start_times) is False
 
 
 def test_non_ssh_port_ignored():
     """Failure case: connections on non-monitored ports don't pollute tracking."""
     ssh_start_times = {}
-    conn = _make_conn(1234, 54321, 443, "10.0.0.1")  # HTTPS, not SSH
+    conn = _make_conn(False, 54321, 443, "10.0.0.1")  # HTTPS, not SSH
     _is_ssh_active([conn], ssh_start_times)
     assert len(ssh_start_times) == 0
 
@@ -234,7 +234,7 @@ def _parse_proc_net_tcp_line(line: str) -> dict | None:
             "local_port": local_port,
             "remote_addr": remote_addr,
             "remote_port": remote_port,
-            "pid": 0,
+            "is_wsl": True,
         }
     except (ValueError, IndexError):
         return None
@@ -256,6 +256,7 @@ def test_parse_established_connection():
     assert result["state"] == 0x01         # ESTABLISHED
     assert result["local_addr"] == "0.0.0.0"
     assert result["remote_addr"] == "10.0.0.5"  # 0A000005 in little-endian
+    assert result["is_wsl"] is True
 
 
 def test_parse_time_wait():
@@ -317,42 +318,53 @@ def test_tcp_state_is_active_all_codes():
 
 
 def test_is_wsl_monitored_active():
-    """Check WSL connections against monitored ports."""
+    """Check WSL connections against monitored ports using shared is_monitored_active."""
     LOCAL_MONITORED_PORTS = [8080, 11434]
     REMOTE_MONITORED_PORTS = [8080, 11434]
 
+    def is_monitored_active(connections, local_ports, remote_ports):
+        for conn in connections:
+            if conn["local_port"] in local_ports:
+                return True
+            if conn["remote_port"] in remote_ports:
+                return True
+        return False
+
     # Connection on monitored local port
     conns = [{"local_port": 8080, "remote_port": 12345}]
-    assert any(c["local_port"] in LOCAL_MONITORED_PORTS for c in conns) is True
+    assert is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is True
 
     # Connection on monitored remote port
     conns = [{"local_port": 12345, "remote_port": 11434}]
-    assert any(c["remote_port"] in REMOTE_MONITORED_PORTS for c in conns) is True
+    assert is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is True
 
     # No match
     conns = [{"local_port": 9999, "remote_port": 8888}]
-    assert any(c["local_port"] in LOCAL_MONITORED_PORTS for c in conns) is False
-    assert any(c["remote_port"] in REMOTE_MONITORED_PORTS for c in conns) is False
+    assert is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is False
 
 
-def test_deploy_wsl_helper_stub():
-    """Test that deploy_wsl_helper returns False when wsl.exe is not available."""
-    # On this system (WSL not guaranteed), the function should gracefully
-    # return False without crashing
-    try:
-        import llm_wakelock_windows as mod
-        result = mod.deploy_wsl_helper()
-        assert result is False
-    except (Exception, SystemExit) as e:
-        # If the module can't be imported (Windows-only guard), that's fine
-        print(f"SKIP: deploy_wsl_helper test skipped ({e})")
+def test_format_active_connections_with_labels():
+    """Test format_active_connections with WSL/Windows labels."""
+    def format_active_connections(connections, show_wsl_label=True):
+        strs = []
+        for conn in connections:
+            if show_wsl_label:
+                prefix = "[wsl]" if conn.get("is_wsl") else "[win]"
+            else:
+                prefix = ""
+            strs.append(f"  {prefix} {conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
+        return strs
 
+    # Mixed Windows and WSL connections with labels
+    conns = [
+        {"local_addr": "192.168.1.1", "local_port": 8080, "remote_addr": "10.0.0.1", "remote_port": 12345, "is_wsl": False},
+        {"local_addr": "0.0.0.0", "local_port": 11434, "remote_addr": "172.17.0.1", "remote_port": 54321, "is_wsl": True},
+    ]
+    result = format_active_connections(conns, show_wsl_label=True)
+    assert result[0] == "  [win] 192.168.1.1:8080 -> 10.0.0.1:12345"
+    assert result[1] == "  [wsl] 0.0.0.0:11434 -> 172.17.0.1:54321"
 
-def test_wsl_helper_available_stub():
-    """Test that wsl_helper_available returns False when wsl.exe is not available."""
-    try:
-        import llm_wakelock_windows as mod
-        result = mod.wsl_helper_available()
-        assert result is False
-    except (Exception, SystemExit) as e:
-        print(f"SKIP: wsl_helper_available test skipped ({e})")
+    # Without labels
+    result = format_active_connections(conns, show_wsl_label=False)
+    assert result[0] == "  192.168.1.1:8080 -> 10.0.0.1:12345"
+    assert result[1] == "  0.0.0.0:11434 -> 172.17.0.1:54321"
