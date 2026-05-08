@@ -1,19 +1,32 @@
+# Configuration for llm_wakelock_windows.py
+#
+# This file is optional. If it does not exist, or if a value is commented out,
+# the built-in default is used (shown below).
+#
+# To override a default, uncomment the line and change the value.
+
 # Ports monitored with instant detection (any established connection counts).
-local_monitored_ports = [8080, 11434]   # llama.cpp, Ollama
+# Default: [8080, 11434]
+# local_monitored_ports = [8080, 11434]
 
 # Ports monitored on the remote side.
-remote_monitored_ports = [8080, 11434]
+# Default: [8080, 11434]
+# remote_monitored_ports = [8080, 11434]
 
 # SSH local and remote ports — set to [22] to enable SSH keep-alive wakelock.
-local_ssh_ports = []
-remote_ssh_ports = []
+# Default: []
+# local_ssh_ports = []
+# remote_ssh_ports = []
 
 # Minimum SSH session duration (seconds) before it counts as active.
-ssh_min_duration = 30.0
+# Default: 30.0
+# ssh_min_duration = 30.0
 
 # How often to poll the TCP table (seconds).
-polling_interval = 5.0
+# Default: 5.0
+# polling_interval = 5.0
 
 # Enable monitoring of WSL2 TCP connections via /proc/net/tcp.
 # When enabled, the same port/SSH config applies to both Windows and WSL2 connections.
-# enable_wsl_monitoring = false
+# Default: false
+# wsl_monitoring = false

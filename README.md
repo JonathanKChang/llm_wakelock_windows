@@ -30,15 +30,34 @@ The `ssh_min_duration` threshold (default: 30 seconds) prevents short-lived SSH 
 
 ## Configuration
 
-Copy `config.toml` from the script directory and edit it. The file ships with all defaults — uncomment or change values as needed.
+Copy `config.toml` from the script directory and uncomment the values you want to override. The file is optional — if it doesn't exist, all built-in defaults are used.
+
+### Built-in defaults
+
+| Setting | Default | Description |
+|---|---|---|
+| `local_monitored_ports` | `[8080, 11434]` | Local ports for instant wakelock |
+| `remote_monitored_ports` | `[8080, 11434]` | Remote ports for instant wakelock |
+| `local_ssh_ports` | `[]` | Local SSH ports |
+| `remote_ssh_ports` | `[]` | Remote SSH ports |
+| `ssh_min_duration` | `30.0` | Min SSH session duration (seconds) |
+| `polling_interval` | `5.0` | Polling interval (seconds) |
+| `wsl_monitoring` | `false` | Monitor WSL2 TCP connections |
+
+Example `config.toml`:
 
 ```toml
-local_monitored_ports = [8080, 11434]   # llama.cpp, Ollama
-remote_monitored_ports = [8080, 11434]
-local_ssh_ports = []
-remote_ssh_ports = []
-ssh_min_duration = 30.0   # seconds — prevents short scripts (git fetch, etc.) from triggering
-polling_interval = 5.0    # seconds
+# Uncomment and change to override defaults
+# local_monitored_ports = [8080, 11434]
+# ssh_min_duration = 30.0
+```
+
+### Adding a new service
+
+Add its port to the monitored port lists:
+
+```toml
+local_monitored_ports = [8080, 11434, 5432]  # llama.cpp + Ollama + local PostgreSQL
 ```
 
 ### Adding a new service
@@ -51,7 +70,7 @@ local_monitored_ports = [8080, 11434, 5432]  # llama.cpp + Ollama + local Postgr
 
 ### Adding SSH support
 
-Enable wakelock for SSH sessions by setting the SSH port:
+Enable wakelock for SSH sessions by uncommenting and setting the SSH port:
 
 ```toml
 local_ssh_ports = [22]
