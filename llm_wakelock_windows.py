@@ -44,6 +44,7 @@ DEFAULTS = {
     "polling_interval": 5.0,
     "wsl_monitoring": False,
     "wsl_docker_monitoring_max": 0,
+    "debug": False,
 }
 
 
@@ -67,6 +68,7 @@ class TcpConnectionMonitor:
 
     def __init__(self, config: dict) -> None:
         self._config = config
+        self._debug = config.get("debug", False)
         self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
         if config["wsl_monitoring"]:
             self._handlers.append(WslTcpHandler(config))
@@ -104,7 +106,7 @@ class TcpConnectionMonitor:
                 del self._ssh_start_times[key]
         return False
 
-    def format_active_connections(self, connections: list[dict], show_source_label: bool = True) -> list[str]:
+    def format_connections(self, connections: list[dict], show_source_label: bool = True) -> list[str]:
         """Format active connection dicts into log strings."""
         _labels = {ConnectionSource.WINDOWS: "win", ConnectionSource.WSL: "wsl", ConnectionSource.WSL_DOCKER: "docker"}
         strs = []
@@ -155,14 +157,17 @@ class TcpConnectionMonitor:
 
             if active and not wakelock:
                 self._acquire()
-                relevant_conns = [
-                    conn for conn in self._get_all_connections()
-                    if (conn["local_port"] in self._config["local_monitored_ports"]
-                        or conn["remote_port"] in self._config["remote_monitored_ports"]
-                        or conn["local_port"] in self._config["local_ssh_ports"]
-                        or conn["remote_port"] in self._config["remote_ssh_ports"])
-                ]
-                print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_active_connections(relevant_conns)))
+                if self._debug:
+                    print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(self._get_all_connections())))
+                else:
+                    relevant_conns = [
+                        conn for conn in self._get_all_connections()
+                        if (conn["local_port"] in self._config["local_monitored_ports"]
+                            or conn["remote_port"] in self._config["remote_monitored_ports"]
+                            or conn["local_port"] in self._config["local_ssh_ports"]
+                            or conn["remote_port"] in self._config["remote_ssh_ports"])
+                    ]
+                    print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
                 wakelock = True
 
             elif not active and wakelock:
@@ -255,8 +260,8 @@ class WslTcpConnectionHandler:
         self._process: subprocess.Popen | None = None
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
-        self._warning_issued = False
         self._header_seen = False
+        self._debug = config.get("debug", False)
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
         """Run a command inside WSL via wsl.exe using sh -c."""
@@ -309,6 +314,10 @@ class WslTcpConnectionHandler:
                 lines.append(self._stdout_queue.get_nowait())
             except queue.Empty:
                 break
+        if self._debug and lines:
+            print(f"  [raw] {len(lines)} lines from {self._command[:60]}")
+            for line in lines:
+                print(f"    {line.rstrip()}")
         return lines
 
     @staticmethod
