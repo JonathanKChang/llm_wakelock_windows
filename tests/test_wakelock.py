@@ -126,21 +126,9 @@ def _make_conn(is_wsl: bool, local_port, remote_port, remote_addr):
 
 
 def _is_ssh_active(connections, ssh_start_times, min_duration=SSH_MIN_DURATION):
-    """Copy of production is_ssh_active for testing — no PID in keys."""
-    now = time.time()
-    active_keys = set()
-    for conn in connections:
-        if conn["local_port"] in [22] or conn["remote_port"] in [22]:
-            key = (conn["local_port"], conn["remote_port"], conn["remote_addr"])
-            active_keys.add(key)
-            if key not in ssh_start_times:
-                ssh_start_times[key] = now
-            elif now - ssh_start_times[key] >= min_duration:
-                return True
-    for key in list(ssh_start_times):
-        if key not in active_keys:
-            del ssh_start_times[key]
-    return False
+    """Wrapper around production is_ssh_active for testing."""
+    import llm_wakelock_windows as mod
+    return mod.is_ssh_active(connections, ssh_start_times, [22], [22], min_duration)
 
 
 # ── SSH Tracking Tests ────────────────────────────────────────────────────────
@@ -202,47 +190,15 @@ _HEADER_KEYWORD = "local_address"
 
 
 def _parse_proc_net_tcp_line(line: str) -> dict | None:
-    """Copy of production _parse_proc_net_tcp_line for testing."""
-    line = line.strip()
-    if not line or _HEADER_KEYWORD in line:
-        return None
-
-    parts = line.split()
-    if len(parts) < 4:
-        return None
-
-    try:
-        local_hex = parts[1]
-        remote_hex = parts[2]
-        state_hex = parts[3]
-
-        local_addr_hex, local_port_hex = local_hex.rsplit(":", 1)
-        remote_addr_hex, remote_port_hex = remote_hex.rsplit(":", 1)
-
-        local_port = int(local_port_hex, 16)
-        remote_port = int(remote_port_hex, 16)
-        state = int(state_hex, 16)
-
-        local_addr_int = int(local_addr_hex, 16)
-        remote_addr_int = int(remote_addr_hex, 16)
-        local_addr = socket.inet_ntoa(struct.pack("<I", local_addr_int))
-        remote_addr = socket.inet_ntoa(struct.pack("<I", remote_addr_int))
-
-        return {
-            "state": state,
-            "local_addr": local_addr,
-            "local_port": local_port,
-            "remote_addr": remote_addr,
-            "remote_port": remote_port,
-            "is_wsl": True,
-        }
-    except (ValueError, IndexError):
-        return None
+    """Wrapper around production WslTcpHandler._parse_proc_net_tcp_line for testing."""
+    import llm_wakelock_windows as mod
+    return mod.WslTcpHandler._parse_proc_net_tcp_line(line)
 
 
 def _tcp_state_is_active(state_hex: int) -> bool:
-    """Copy of production _tcp_state_is_active for testing."""
-    return state_hex == 0x01
+    """Wrapper around production WslTcpHandler._tcp_state_is_active for testing."""
+    import llm_wakelock_windows as mod
+    return mod.WslTcpHandler._tcp_state_is_active(state_hex)
 
 
 def test_parse_established_connection():
@@ -318,42 +274,28 @@ def test_tcp_state_is_active_all_codes():
 
 
 def test_is_wsl_monitored_active():
-    """Check WSL connections against monitored ports using shared is_monitored_active."""
+    """Check connections against monitored ports using shared is_monitored_active."""
+    import llm_wakelock_windows as mod
     LOCAL_MONITORED_PORTS = [8080, 11434]
     REMOTE_MONITORED_PORTS = [8080, 11434]
 
-    def is_monitored_active(connections, local_ports, remote_ports):
-        for conn in connections:
-            if conn["local_port"] in local_ports:
-                return True
-            if conn["remote_port"] in remote_ports:
-                return True
-        return False
-
     # Connection on monitored local port
     conns = [{"local_port": 8080, "remote_port": 12345}]
-    assert is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is True
+    assert mod.is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is True
 
     # Connection on monitored remote port
     conns = [{"local_port": 12345, "remote_port": 11434}]
-    assert is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is True
+    assert mod.is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is True
 
     # No match
     conns = [{"local_port": 9999, "remote_port": 8888}]
-    assert is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is False
+    assert mod.is_monitored_active(conns, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) is False
 
 
 def test_format_active_connections_with_labels():
     """Test format_active_connections with WSL/Windows labels."""
-    def format_active_connections(connections, show_wsl_label=True):
-        strs = []
-        for conn in connections:
-            if show_wsl_label:
-                prefix = "[wsl]" if conn.get("is_wsl") else "[win]"
-                strs.append(f"  {prefix} {conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
-            else:
-                strs.append(f"  {conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
-        return strs
+    import llm_wakelock_windows as mod
+    format_active_connections = mod.format_active_connections
 
     # Mixed Windows and WSL connections with labels
     conns = [
