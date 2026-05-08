@@ -278,9 +278,8 @@ class WslTcpHandler:
         return connections
 
 
-if sys.platform != "win32":
-    print("Error: this script requires Windows", file=sys.stderr)
-    sys.exit(1)
+
+
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 # Defaults — override by placing config.toml next to this script.
@@ -416,33 +415,38 @@ def release():
 wakelock = False
 ssh_start_times = {}
 
-while True:
-    active = has_active_connections(ssh_start_times)
-    now = datetime.datetime.now().isoformat()
+if __name__ == "__main__":
+    if sys.platform != "win32":
+        print("Error: this script requires Windows", file=sys.stderr)
+        sys.exit(1)
 
-    if active and not wakelock:
-        acquire()
-        # Collect relevant connections from both sources
-        relevant_conns = []
-        for conn in windows_handler.get_connections():
-            if (conn["local_port"] in LOCAL_MONITORED_PORTS
-                    or conn["remote_port"] in REMOTE_MONITORED_PORTS
-                    or conn["local_port"] in LOCAL_SSH_PORTS
-                    or conn["remote_port"] in REMOTE_SSH_PORTS):
-                relevant_conns.append(conn)
-        if wsl_handler is not None:
-            for conn in wsl_handler.get_connections():
+    while True:
+        active = has_active_connections(ssh_start_times)
+        now = datetime.datetime.now().isoformat()
+
+        if active and not wakelock:
+            acquire()
+            # Collect relevant connections from both sources
+            relevant_conns = []
+            for conn in windows_handler.get_connections():
                 if (conn["local_port"] in LOCAL_MONITORED_PORTS
                         or conn["remote_port"] in REMOTE_MONITORED_PORTS
                         or conn["local_port"] in LOCAL_SSH_PORTS
                         or conn["remote_port"] in REMOTE_SSH_PORTS):
                     relevant_conns.append(conn)
-        print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(format_active_connections(relevant_conns)))
-        wakelock = True
+            if wsl_handler is not None:
+                for conn in wsl_handler.get_connections():
+                    if (conn["local_port"] in LOCAL_MONITORED_PORTS
+                            or conn["remote_port"] in REMOTE_MONITORED_PORTS
+                            or conn["local_port"] in LOCAL_SSH_PORTS
+                            or conn["remote_port"] in REMOTE_SSH_PORTS):
+                        relevant_conns.append(conn)
+            print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(format_active_connections(relevant_conns)))
+            wakelock = True
 
-    elif not active and wakelock:
-        release()
-        print(f"[{now}] Releasing wakelock")
-        wakelock = False
+        elif not active and wakelock:
+            release()
+            print(f"[{now}] Releasing wakelock")
+            wakelock = False
 
-    time.sleep(POLLING_INTERVAL)
+        time.sleep(POLLING_INTERVAL)
