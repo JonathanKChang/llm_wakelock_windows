@@ -67,7 +67,8 @@ remote_ssh_ports = [22]
 |---|---|
 | `llm_wakelock_windows.py` | Main daemon — run on Windows |
 | `dump_iphlpapi.py` | Utility: dumps raw TCP table to a binary file for analysis |
-| `test_wakelock.py` | Tests: parses a TCP table blob (skips if missing) + SSH tracking logic (pure Python, runs on any platform) |
+| `wsl_tcp_monitor.sh` | WSL helper: reads `/proc/net/tcp` |
+| `tests/test_wakelock.py` | Tests: parses a TCP table blob (skips if missing) + SSH tracking logic (pure Python, runs on any platform) |
 
 ## Requirements
 
@@ -81,3 +82,18 @@ python llm_wakelock_windows.py
 ```
 
 The script runs indefinitely. It prints the current time and relevant connection details whenever a wakelock is acquired.
+
+## Testing
+
+Run tests with pytest (install first if needed):
+
+```bash
+pip install pytest
+python -m pytest tests/test_wakelock.py -v
+```
+
+Or run directly (tests that require Windows will be skipped):
+
+```bash
+python tests/test_wakelock.py
+```
