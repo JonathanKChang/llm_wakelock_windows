@@ -479,8 +479,6 @@ class WslDockerManager(TcpConnectionSource):
             handler = WslDockerTcpHandler(self._config, cid)
             if not handler.unavailable:
                 self._container_handlers.append(handler)
-            else:
-                self.unavailable = True
 
     def get_connections(self) -> list[dict]:
         """Aggregate connections from all container handlers."""
