@@ -439,6 +439,64 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         return conns
 
 
+class WslDockerManager(TcpConnectionSource):
+    """Manages multiple WslDockerTcpHandler instances with auto-discovery."""
+
+    def __init__(self, config: dict) -> None:
+        self._config = config
+        self._unavailable: str | None = None
+        self._container_handlers: list[WslDockerTcpHandler] = []
+        self._warning_issued = False
+        self._discover_containers()
+
+    @property
+    def unavailable(self) -> str | None:
+        return self._unavailable
+
+    def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
+        """Run a command inside WSL via wsl.exe using sh -c."""
+        try:
+            result = subprocess.run(
+                ["wsl.exe", "-e", "sh", "-c", cmd],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if check and result.returncode != 0:
+                return None
+            return result
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+
+    def _discover_containers(self) -> None:
+        """Discover running Docker containers, cap at wsl_docker_monitoring_max."""
+        max_containers = self._config.get("wsl_docker_monitoring_max", 0)
+        if max_containers < 1:
+            return
+        result = self._run_command("docker ps --format '{{.ID}}'", check=True)
+        if result is None or result.returncode != 0:
+            if not self._warning_issued:
+                self._unavailable = "docker not available in WSL"
+                print(f"[{self._unavailable}]")
+                self._warning_issued = True
+            return
+        container_ids = [cid.strip() for cid in result.stdout.strip().split("\n") if cid.strip()]
+        for cid in container_ids[:max_containers]:
+            handler = WslDockerTcpHandler(self._config, cid)
+            if not handler.unavailable:
+                self._container_handlers.append(handler)
+            elif not self._warning_issued:
+                self._warning_issued = True
+
+    def get_connections(self) -> list[dict]:
+        """Aggregate connections from all container handlers."""
+        if self._unavailable:
+            return []
+        all_conns: list[dict] = []
+        for handler in self._container_handlers:
+            all_conns.extend(handler.get_connections())
+        return all_conns
+
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
