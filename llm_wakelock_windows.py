@@ -386,9 +386,9 @@ def format_active_connections(connections: list[dict], show_wsl_label: bool = Tr
     for conn in connections:
         if show_wsl_label:
             prefix = "[wsl]" if conn.get("is_wsl") else "[win]"
+            strs.append(f"  {prefix} {conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
         else:
-            prefix = ""
-        strs.append(f"  {prefix} {conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
+            strs.append(f"  {conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
     return strs
 
 
