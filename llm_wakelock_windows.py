@@ -26,6 +26,13 @@ import threading
 import queue
 from typing import Protocol
 
+
+class TcpConnectionSource(Protocol):
+    """Protocol for TCP connection sources (Windows and WSL)."""
+
+    def get_connections(self) -> list[dict]: ...
+
+
 if sys.platform != "win32":
     print("Error: this script requires Windows", file=sys.stderr)
     sys.exit(1)
