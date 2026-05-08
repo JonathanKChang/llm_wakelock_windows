@@ -23,6 +23,7 @@ import os
 import subprocess
 import threading
 import queue
+import pprint
 from typing import Protocol
 
 
@@ -368,14 +369,8 @@ def load_config() -> dict:
     return config
 
 
-# ── Entry point ──────────────────────────────────────────────────────────────
-
-def main() -> None:
+if __name__ == "__main__":
     config = load_config()
     monitor = TcpConnectionMonitor(config)
     monitor.run()
-
-
-if __name__ == "__main__":
-    main()
 
