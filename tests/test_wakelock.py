@@ -10,6 +10,9 @@ import time
 
 import llm_wakelock_windows as mod
 
+_M = mod.TcpConnectionMonitor
+_C = mod.ConnectionSource
+
 
 def _ssh_conn(local_addr, local_port, remote_port, remote_addr):
     """Build a minimal connection dict for SSH tests."""
@@ -33,6 +36,7 @@ def _monitor():
         "ssh_min_duration": 30.0,
         "polling_interval": 5.0,
         "wsl_monitoring": False,
+        "wsl_docker_monitoring_max": 0,
     })
 
 
@@ -91,12 +95,12 @@ def test_non_ssh_port_ignored():
 
 
 def _parse_line(line: str):
-    """Wrapper around production WslTcpHandler._parse_proc_net_tcp_line."""
+    """Wrapper around production WslTcpConnectionHandler._parse_proc_net_tcp_line."""
     return mod.WslTcpHandler._parse_proc_net_tcp_line(line)
 
 
 def _tcp_state_is_active(state_hex: int) -> bool:
-    """Wrapper around production WslTcpHandler._tcp_state_is_active."""
+    """Wrapper around production WslTcpConnectionHandler._tcp_state_is_active."""
     return mod.WslTcpHandler._tcp_state_is_active(state_hex)
 
 
@@ -107,10 +111,10 @@ def test_parse_established_connection():
     assert result is not None
     assert result["local_port"] == 8080
     assert result["remote_port"] == 8000
-    assert result["state"] == 0x01
+    assert result["state"] == _M.ESTABLISHED
     assert result["local_addr"] == "0.0.0.0"
     assert result["remote_addr"] == "10.0.0.5"
-    assert result["is_wsl"] is True
+    assert result["source"] == _C.WSL
 
 
 def test_parse_time_wait():
@@ -118,7 +122,7 @@ def test_parse_time_wait():
     line = "1:  0100007F:1F90 0100007F:C350 06 00000000:00000000 0:00000000 00000000     0     0 5 1 17 0 0 1 0"
     result = _parse_line(line)
     assert result is not None
-    assert result["state"] == 0x06
+    assert result["state"] == 0x06  # TIME_WAIT
 
 
 def test_parse_close_wait():
@@ -126,7 +130,7 @@ def test_parse_close_wait():
     line = "2:  0100007F:1F90 0100007F:C350 08 00000000:00000000 0:00000000 00000000     0     0 3 1 17 0 0 1 0"
     result = _parse_line(line)
     assert result is not None
-    assert result["state"] == 0x08
+    assert result["state"] == 0x08  # CLOSE_WAIT
 
 
 def test_parse_listen():
@@ -134,7 +138,7 @@ def test_parse_listen():
     line = "3:  00000000:1F90 00000000:0000 0A 00000000:00000000 0:00000000 00000000     0     0 1 0 10 0 0 1 0"
     result = _parse_line(line)
     assert result is not None
-    assert result["state"] == 0x0A
+    assert result["state"] == 0x0A  # LISTEN
 
 
 def test_parse_header_line():
@@ -155,8 +159,8 @@ def test_parse_malformed_line():
 
 
 def test_tcp_state_is_active_all_codes():
-    """Test all TCP state codes: only 0x01 (ESTABLISHED) is active."""
-    assert _tcp_state_is_active(0x01) is True
+    """Test all TCP state codes: only ESTABLISHED (0x01) is active."""
+    assert _tcp_state_is_active(_M.ESTABLISHED) is True
     for state in [0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B]:
         assert _tcp_state_is_active(state) is False, f"State {state:#04x} should be inactive"
 
@@ -167,21 +171,21 @@ def test_tcp_state_is_active_all_codes():
 def test_is_monitored_active():
     """Check connections against monitored ports."""
     mon = _monitor()
-    assert mon.is_monitored_active([{"local_port": 8080, "remote_port": 12345}], [8080, 11434], [8080, 11434]) is True
-    assert mon.is_monitored_active([{"local_port": 12345, "remote_port": 11434}], [8080, 11434], [8080, 11434]) is True
-    assert mon.is_monitored_active([{"local_port": 9999, "remote_port": 8888}], [8080, 11434], [8080, 11434]) is False
+    assert mon.is_monitored_active([{"local_port": 8080, "remote_port": 12345, "source": _C.WINDOWS}], [8080, 11434], [8080, 11434]) is True
+    assert mon.is_monitored_active([{"local_port": 12345, "remote_port": 11434, "source": _C.WINDOWS}], [8080, 11434], [8080, 11434]) is True
+    assert mon.is_monitored_active([{"local_port": 9999, "remote_port": 8888, "source": _C.WINDOWS}], [8080, 11434], [8080, 11434]) is False
 
 
 def test_format_active_connections_with_labels():
-    """Test format_active_connections with WSL/Windows labels."""
+    """Test format_active_connections with source labels."""
     mon = _monitor()
     conns = [
-        {"local_addr": "192.168.1.1", "local_port": 8080, "remote_addr": "10.0.0.1", "remote_port": 12345, "is_wsl": False},
-        {"local_addr": "0.0.0.0", "local_port": 11434, "remote_addr": "172.17.0.1", "remote_port": 54321, "is_wsl": True},
+        {"local_addr": "192.168.1.1", "local_port": 8080, "remote_addr": "10.0.0.1", "remote_port": 12345, "source": _C.WINDOWS},
+        {"local_addr": "0.0.0.0", "local_port": 11434, "remote_addr": "172.17.0.1", "remote_port": 54321, "source": _C.WSL},
     ]
-    result = mon.format_active_connections(conns, show_wsl_label=True)
+    result = mon.format_active_connections(conns, show_source_label=True)
     assert result[0] == "  [win] 192.168.1.1:8080 -> 10.0.0.1:12345"
     assert result[1] == "  [wsl] 0.0.0.0:11434 -> 172.17.0.1:54321"
-    result = mon.format_active_connections(conns, show_wsl_label=False)
+    result = mon.format_active_connections(conns, show_source_label=False)
     assert result[0] == "  192.168.1.1:8080 -> 10.0.0.1:12345"
     assert result[1] == "  0.0.0.0:11434 -> 172.17.0.1:54321"

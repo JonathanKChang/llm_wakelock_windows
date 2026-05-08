@@ -24,7 +24,14 @@ import subprocess
 import threading
 import queue
 import pprint
+from enum import Enum
 from typing import Protocol
+
+
+class ConnectionSource(Enum):
+    WINDOWS = 0
+    WSL = 1
+    WSL_DOCKER = 2
 
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
@@ -93,11 +100,17 @@ class TcpConnectionMonitor:
                 del self._ssh_start_times[key]
         return False
 
-    def format_active_connections(self, connections: list[dict], show_wsl_label: bool = True) -> list[str]:
+    def format_active_connections(self, connections: list[dict], show_source_label: bool = True) -> list[str]:
         """Format active connection dicts into log strings."""
+        _labels = {ConnectionSource.WINDOWS: "win", ConnectionSource.WSL: "wsl", ConnectionSource.WSL_DOCKER: "docker"}
         strs = []
         for conn in connections:
-            prefix = (f"[{conn['is_wsl'] and 'wsl' or 'win'}] " if show_wsl_label else "")
+            src = conn.get("source", ConnectionSource.WINDOWS)
+            label = _labels.get(src, "?")
+            cid = conn.get("container_id")
+            if cid and src == ConnectionSource.WSL_DOCKER:
+                label = f"docker:{cid[:12]}"
+            prefix = (f"[{label}] " if show_source_label else "")
             strs.append(f"  {prefix}{conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
         return strs
 
@@ -157,12 +170,13 @@ class TcpConnectionMonitor:
 
 
 # Connection dict schema (returned by TcpConnectionSource.get_connections()):
-#   state       (int)   — TCP state code (5 = ESTABLISHED)
-#   local_addr  (str)   — dotted IPv4 address
-#   local_port  (int)   — local port number
-#   remote_addr (str)   — dotted IPv4 address
-#   remote_port (int)   — remote port number
-#   is_wsl      (bool)  — True if from WSL2, False if from Windows
+#   state         (int)   — TCP state code (5 = ESTABLISHED)
+#   local_addr    (str)   — dotted IPv4 address
+#   local_port    (int)   — local port number
+#   remote_addr   (str)   — dotted IPv4 address
+#   remote_port   (int)   — remote port number
+#   source        (ConnectionSource) — WINDOWS, WSL, or WSL_DOCKER
+#   container_id  (str)   — Docker container short ID (only for WSL_DOCKER)
 
 
 class WindowsTcpHandler:
@@ -213,7 +227,7 @@ class WindowsTcpHandler:
                 "local_port": socket.ntohs(row.dwLocalPort & 0xFFFF),
                 "remote_addr": socket.inet_ntoa(struct.pack("<L", row.dwRemoteAddr)),
                 "remote_port": socket.ntohs(row.dwRemotePort & 0xFFFF),
-                "is_wsl": False,
+                "source": ConnectionSource.WINDOWS,
             })
         return connections
 
@@ -317,7 +331,7 @@ class WslTcpHandler:
                 "local_port": local_port,
                 "remote_addr": remote_addr,
                 "remote_port": remote_port,
-                "is_wsl": True,
+                "source": ConnectionSource.WSL,
             }
         except (ValueError, IndexError):
             return None
