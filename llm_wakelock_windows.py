@@ -50,6 +50,8 @@ class TcpConnectionSource(Protocol):
     """Protocol for TCP connection sources (Windows and WSL)."""
 
     def get_connections(self) -> list[dict]: ...
+    @property
+    def unavailable(self) -> str | None: ...
 
 
 class TcpConnectionMonitor:
@@ -184,6 +186,11 @@ class WindowsTcpHandler:
 
     def __init__(self, config: dict) -> None:
         self._config = config
+        self._unavailable: str | None = None
+
+    @property
+    def unavailable(self) -> str | None:
+        return self._unavailable
 
     def get_connections(self) -> list[dict]:
         """Retrieve all established TCP connections from Windows iphlpapi."""
@@ -237,10 +244,15 @@ class WslTcpHandler:
 
     def __init__(self, config: dict) -> None:
         self._config = config
+        self._unavailable: str | None = None
         self._process: subprocess.Popen | None = None
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
         self._warning_issued = False
+
+    @property
+    def unavailable(self) -> str | None:
+        return self._unavailable
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
         """Run a command inside WSL via wsl.exe."""
