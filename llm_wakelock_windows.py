@@ -45,15 +45,11 @@ class TcpConnectionMonitor:
     ERROR_INSUFFICIENT_BUFFER = 122
 
     def __init__(self, config: dict) -> None:
+        self._config = config
         self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
         if config["enable_wsl_monitoring"]:
             self._handlers.append(WslTcpHandler(config))
         self._ssh_start_times: dict = {}
-        self._local_monitored_ports = config["local_monitored_ports"]
-        self._remote_monitored_ports = config["remote_monitored_ports"]
-        self._local_ssh_ports = config["local_ssh_ports"]
-        self._remote_ssh_ports = config["remote_ssh_ports"]
-        self._ssh_min_duration = config["ssh_min_duration"]
 
     def is_monitored_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
         """Check if any connection matches monitored ports (works with any source)."""
@@ -93,6 +89,60 @@ class TcpConnectionMonitor:
             strs.append(f"  {prefix}{conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
         return strs
 
+    def _get_all_connections(self) -> list[dict]:
+        """Collect connections from all handlers into a single list."""
+        all_conns: list[dict] = []
+        for handler in self._handlers:
+            all_conns.extend(handler.get_connections())
+        return all_conns
+
+    def has_active_connections(self) -> bool:
+        """Check for active monitored-port or SSH connections from all sources."""
+        all_conns = self._get_all_connections()
+        return self.is_monitored_active(all_conns, self._config["local_monitored_ports"], self._config["remote_monitored_ports"]) or \
+               self.is_ssh_active(all_conns, self._config["local_ssh_ports"], self._config["remote_ssh_ports"], self._config["ssh_min_duration"])
+
+    def _acquire(self) -> None:
+        """Acquires system wake lock to prevent sleep."""
+        ctypes.windll.kernel32.SetThreadExecutionState(
+            TcpConnectionMonitor.ES_CONTINUOUS | TcpConnectionMonitor.ES_SYSTEM_REQUIRED
+        )
+
+    def _release(self) -> None:
+        """Resets idle timer then releases system wake lock."""
+        ctypes.windll.kernel32.SetThreadExecutionState(TcpConnectionMonitor.ES_SYSTEM_REQUIRED)
+        ctypes.windll.kernel32.SetThreadExecutionState(TcpConnectionMonitor.ES_CONTINUOUS)
+
+    def run(self) -> None:
+        """Main loop: monitor connections and manage wakelock."""
+        if sys.platform != "win32":
+            print("Error: this script requires Windows", file=sys.stderr)
+            sys.exit(1)
+
+        wakelock = False
+        while True:
+            active = self.has_active_connections()
+            now = datetime.datetime.now().isoformat()
+
+            if active and not wakelock:
+                self._acquire()
+                relevant_conns = [
+                    conn for conn in self._get_all_connections()
+                    if (conn["local_port"] in self._config["local_monitored_ports"]
+                        or conn["remote_port"] in self._config["remote_monitored_ports"]
+                        or conn["local_port"] in self._config["local_ssh_ports"]
+                        or conn["remote_port"] in self._config["remote_ssh_ports"])
+                ]
+                print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_active_connections(relevant_conns)))
+                wakelock = True
+
+            elif not active and wakelock:
+                self._release()
+                print(f"[{now}] Releasing wakelock")
+                wakelock = False
+
+            time.sleep(self._config["polling_interval"])
+
 
 # Connection dict schema (returned by TcpConnectionSource.get_connections()):
 #   state       (int)   — TCP state code (5 = ESTABLISHED)
@@ -107,11 +157,7 @@ class WindowsTcpHandler:
     """Handles Windows TCP connection retrieval via iphlpapi."""
 
     def __init__(self, config: dict) -> None:
-        self.local_monitored_ports = config["local_monitored_ports"]
-        self.remote_monitored_ports = config["remote_monitored_ports"]
-        self.local_ssh_ports = config["local_ssh_ports"]
-        self.remote_ssh_ports = config["remote_ssh_ports"]
-        self.ssh_min_duration = config["ssh_min_duration"]
+        self._config = config
 
     def get_connections(self) -> list[dict]:
         """Retrieve all established TCP connections from Windows iphlpapi."""
@@ -164,13 +210,7 @@ class WslTcpHandler:
     """Handles WSL TCP connection retrieval via persistent subprocess."""
 
     def __init__(self, config: dict) -> None:
-        self.local_monitored_ports = config["local_monitored_ports"]
-        self.remote_monitored_ports = config["remote_monitored_ports"]
-        self.local_ssh_ports = config["local_ssh_ports"]
-        self.remote_ssh_ports = config["remote_ssh_ports"]
-        self.ssh_min_duration = config["ssh_min_duration"]
-        self.polling_interval = config["polling_interval"]
-        self.enable_wsl_monitoring = config["enable_wsl_monitoring"]
+        self._config = config
         self._process: subprocess.Popen | None = None
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
@@ -205,7 +245,7 @@ class WslTcpHandler:
     def _start_subprocess(self) -> subprocess.Popen | None:
         """Spawn the persistent WSL subprocess running a bash one-liner."""
         try:
-            cmd = f"while true; do cat /proc/net/tcp; sleep {self.polling_interval}; done"
+            cmd = f"while true; do cat /proc/net/tcp; sleep {self._config['polling_interval']}; done"
             proc = subprocess.Popen(
                 ["wsl.exe", "-e", "bash", "-c", cmd],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -277,7 +317,7 @@ class WslTcpHandler:
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from the WSL subprocess."""
-        if not self.enable_wsl_monitoring:
+        if not self._config["enable_wsl_monitoring"]:
             return []
 
         # Ensure subprocess is running
@@ -335,122 +375,35 @@ ENABLE_WSL_MONITORING = config["enable_wsl_monitoring"]
 
 pprint.pprint(config, sort_dicts=False)
 
-# ── Handler Instances ────────────────────────────────────────────────────────
-windows_handler = WindowsTcpHandler(config)
-wsl_handler: WslTcpHandler | None = None
-if ENABLE_WSL_MONITORING:
-    wsl_handler = WslTcpHandler(config)
+# ── Module-level monitor instance (for test backward compatibility) ─────────
+monitor = TcpConnectionMonitor(config)
+pprint.pprint(config, sort_dicts=False)
 
 
-# ── Shared Logic ─────────────────────────────────────────────────────────────
-
+# Thin wrappers for test backward compatibility (Phase 7 will remove these)
 def is_monitored_active(connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
-    """Check if any connection matches monitored ports (works with any source)."""
-    for conn in connections:
-        if conn["local_port"] in local_ports:
-            return True
-        if conn["remote_port"] in remote_ports:
-            return True
-    return False
+    return monitor.is_monitored_active(connections, local_ports, remote_ports)
 
 
 def is_ssh_active(connections: list[dict], ssh_start_times: dict, local_ports: list[int], remote_ports: list[int], min_duration: float) -> bool:
-    """Check if any SSH connections have been active for at least min_duration.
-
-    Tracks each connection by (local_port, remote_port, remote_addr) — no PID.
-    Prunes stale entries when a connection drops.
-    """
-    now = time.time()
-    active_keys = set()
-    for conn in connections:
-        if conn["local_port"] in local_ports or conn["remote_port"] in remote_ports:
-            key = (conn["local_port"], conn["remote_port"], conn["remote_addr"])
-            active_keys.add(key)
-            if key not in ssh_start_times:
-                ssh_start_times[key] = now
-            elif now - ssh_start_times[key] >= min_duration:
-                return True
-    for key in list(ssh_start_times):
-        if key not in active_keys:
-            del ssh_start_times[key]
-    return False
+    return monitor.is_ssh_active(connections, local_ports, remote_ports, min_duration)
 
 
 def has_active_connections(ssh_start_times: dict) -> bool:
-    """Check for active monitored-port or SSH connections (Windows + WSL2)."""
-    windows_connections = windows_handler.get_connections()
-    windows_active = is_monitored_active(windows_connections, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) or \
-                     is_ssh_active(windows_connections, ssh_start_times, LOCAL_SSH_PORTS, REMOTE_SSH_PORTS, SSH_MIN_DURATION)
-
-    wsl_active = False
-    if wsl_handler is not None:
-        wsl_connections = wsl_handler.get_connections()
-        wsl_active = is_monitored_active(wsl_connections, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) or \
-                     is_ssh_active(wsl_connections, ssh_start_times, LOCAL_SSH_PORTS, REMOTE_SSH_PORTS, SSH_MIN_DURATION)
-
-    return windows_active or wsl_active
+    return monitor.has_active_connections()
 
 
 def format_active_connections(connections: list[dict], show_wsl_label: bool = True) -> list[str]:
-    """Format active connection dicts into log strings."""
-    strs = []
-    for conn in connections:
-        prefix = (f"[{conn['is_wsl'] and 'wsl' or 'win'}] " if show_wsl_label else "")
-        strs.append(f"  {prefix}{conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
-    return strs
+    return monitor.format_active_connections(connections, show_wsl_label)
 
 
-def acquire():
-    """Acquires system wake lock to prevent sleep."""
-    ctypes.windll.kernel32.SetThreadExecutionState(
-        ES_CONTINUOUS | ES_SYSTEM_REQUIRED
-    )
+def acquire() -> None:
+    monitor._acquire()
 
 
-def release():
-    """Resets idle timer then releases system wake lock"""
+def release() -> None:
+    monitor._release()
 
-    # Pulse the wake-lock flag briefly to reset idle timer
-    ctypes.windll.kernel32.SetThreadExecutionState(ES_SYSTEM_REQUIRED)
-
-    ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
-
-
-wakelock = False
-ssh_start_times = {}
 
 if __name__ == "__main__":
-    if sys.platform != "win32":
-        print("Error: this script requires Windows", file=sys.stderr)
-        sys.exit(1)
-
-    while True:
-        active = has_active_connections(ssh_start_times)
-        now = datetime.datetime.now().isoformat()
-
-        if active and not wakelock:
-            acquire()
-            # Collect relevant connections from both sources
-            relevant_conns = []
-            for conn in windows_handler.get_connections():
-                if (conn["local_port"] in LOCAL_MONITORED_PORTS
-                        or conn["remote_port"] in REMOTE_MONITORED_PORTS
-                        or conn["local_port"] in LOCAL_SSH_PORTS
-                        or conn["remote_port"] in REMOTE_SSH_PORTS):
-                    relevant_conns.append(conn)
-            if wsl_handler is not None:
-                for conn in wsl_handler.get_connections():
-                    if (conn["local_port"] in LOCAL_MONITORED_PORTS
-                            or conn["remote_port"] in REMOTE_MONITORED_PORTS
-                            or conn["local_port"] in LOCAL_SSH_PORTS
-                            or conn["remote_port"] in REMOTE_SSH_PORTS):
-                        relevant_conns.append(conn)
-            print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(format_active_connections(relevant_conns)))
-            wakelock = True
-
-        elif not active and wakelock:
-            release()
-            print(f"[{now}] Releasing wakelock")
-            wakelock = False
-
-        time.sleep(POLLING_INTERVAL)
+    monitor.run()
