@@ -33,6 +33,18 @@ class TcpConnectionSource(Protocol):
     def get_connections(self) -> list[dict]: ...
 
 
+class TcpConnectionMonitor:
+    """Named constants shared across handlers and the main loop."""
+
+    ESTABLISHED = 0x01
+    MIB_TCP_STATE_ESTAB = 5
+    ES_CONTINUOUS = 0x80000000
+    ES_SYSTEM_REQUIRED = 0x00000001
+    AF_INET = 2
+    TCP_TABLE_OWNER_PID_ALL = 5
+    ERROR_INSUFFICIENT_BUFFER = 122
+
+
 # Connection dict schema (returned by TcpConnectionSource.get_connections()):
 #   state       (int)   — TCP state code (5 = ESTABLISHED)
 #   local_addr  (str)   — dotted IPv4 address
@@ -45,33 +57,26 @@ class TcpConnectionSource(Protocol):
 class WindowsTcpHandler:
     """Handles Windows TCP connection retrieval via iphlpapi."""
 
-    def __init__(
-        self,
-        local_monitored_ports: list[int],
-        remote_monitored_ports: list[int],
-        local_ssh_ports: list[int],
-        remote_ssh_ports: list[int],
-        ssh_min_duration: float,
-    ) -> None:
-        self.local_monitored_ports = local_monitored_ports
-        self.remote_monitored_ports = remote_monitored_ports
-        self.local_ssh_ports = local_ssh_ports
-        self.remote_ssh_ports = remote_ssh_ports
-        self.ssh_min_duration = ssh_min_duration
+    def __init__(self, config: dict) -> None:
+        self.local_monitored_ports = config["local_monitored_ports"]
+        self.remote_monitored_ports = config["remote_monitored_ports"]
+        self.local_ssh_ports = config["local_ssh_ports"]
+        self.remote_ssh_ports = config["remote_ssh_ports"]
+        self.ssh_min_duration = config["ssh_min_duration"]
 
     def get_connections(self) -> list[dict]:
         """Retrieve all established TCP connections from Windows iphlpapi."""
         iphlpapi = ctypes.windll.iphlpapi
         size = ctypes.c_ulong(0)
         ret = iphlpapi.GetExtendedTcpTable(
-            None, ctypes.byref(size), True, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
+            None, ctypes.byref(size), True, TcpConnectionMonitor.AF_INET, TcpConnectionMonitor.TCP_TABLE_OWNER_PID_ALL, 0
         )
-        if ret != ERROR_INSUFFICIENT_BUFFER:
+        if ret != TcpConnectionMonitor.ERROR_INSUFFICIENT_BUFFER:
             raise OSError(f"Unexpected error querying TCP table size: {ret}")
 
         buf = ctypes.create_string_buffer(size.value)
         ret = iphlpapi.GetExtendedTcpTable(
-            buf, ctypes.byref(size), True, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
+            buf, ctypes.byref(size), True, TcpConnectionMonitor.AF_INET, TcpConnectionMonitor.TCP_TABLE_OWNER_PID_ALL, 0
         )
         if ret != 0:
             raise OSError(f"GetExtendedTcpTable failed: {ret}")
@@ -93,7 +98,7 @@ class WindowsTcpHandler:
         connections = []
         for i in range(num_entries):
             row = row_ptr[i]
-            if row.dwState != MIB_TCP_STATE_ESTAB:
+            if row.dwState != TcpConnectionMonitor.MIB_TCP_STATE_ESTAB:
                 continue
             connections.append({
                 "state": row.dwState,
@@ -107,29 +112,19 @@ class WindowsTcpHandler:
 
 
 class WslTcpHandler:
-    """Handles WSL2 TCP connection retrieval via persistent subprocess."""
+    """Handles WSL TCP connection retrieval via persistent subprocess."""
 
-    def __init__(
-        self,
-        local_monitored_ports: list[int],
-        remote_monitored_ports: list[int],
-        local_ssh_ports: list[int],
-        remote_ssh_ports: list[int],
-        ssh_min_duration: float,
-        polling_interval: float,
-        enable_wsl_monitoring: bool,
-    ) -> None:
-        self.local_monitored_ports = local_monitored_ports
-        self.remote_monitored_ports = remote_monitored_ports
-        self.local_ssh_ports = local_ssh_ports
-        self.remote_ssh_ports = remote_ssh_ports
-        self.ssh_min_duration = ssh_min_duration
-        self.polling_interval = polling_interval
-        self.enable_wsl_monitoring = enable_wsl_monitoring
+    def __init__(self, config: dict) -> None:
+        self.local_monitored_ports = config["local_monitored_ports"]
+        self.remote_monitored_ports = config["remote_monitored_ports"]
+        self.local_ssh_ports = config["local_ssh_ports"]
+        self.remote_ssh_ports = config["remote_ssh_ports"]
+        self.ssh_min_duration = config["ssh_min_duration"]
+        self.polling_interval = config["polling_interval"]
+        self.enable_wsl_monitoring = config["enable_wsl_monitoring"]
         self._process: subprocess.Popen | None = None
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
-        self._helper_deployed = False
         self._warning_issued = False
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
@@ -146,28 +141,9 @@ class WslTcpHandler:
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return None
 
-    def _deploy_helper(self) -> bool:
-        """Deploy the bash helper script to WSL."""
-        if self._helper_deployed:
-            return True
-        script_content = (f"while true; do\n"
-                          f"  cat /proc/net/tcp\n"
-                          f"  sleep {self.polling_interval}\n"
-                          f"done\n")
-        cmd = (f'mkdir -p ~/bin && cat > ~/bin/wsl_tcp_monitor.sh << \'WSL_HELPER_EOF\'\n'
-               f'{script_content}WSL_HELPER_EOF\nchmod +x ~/bin/wsl_tcp_monitor.sh')
-        result = self._run_command(cmd)
-        if result and result.returncode == 0:
-            self._helper_deployed = True
-            return True
-        return False
-
-    def _helper_available(self) -> bool:
-        """Check if wsl.exe is available and the helper script exists."""
-        if self._run_command("echo ok") is None:
-            return False
-        result = self._run_command("test -f ~/bin/wsl_tcp_monitor.sh && echo yes", check=False)
-        return result is not None and result.stdout.strip() == "yes"
+    def _wsl_available(self) -> bool:
+        """Check if wsl.exe is reachable."""
+        return self._run_command("echo ok") is not None
 
     def _stdout_reader(self, process: subprocess.Popen) -> None:
         """Daemon thread that reads subprocess stdout into the queue."""
@@ -178,10 +154,11 @@ class WslTcpHandler:
             pass
 
     def _start_subprocess(self) -> subprocess.Popen | None:
-        """Spawn the persistent WSL subprocess."""
+        """Spawn the persistent WSL subprocess running a bash one-liner."""
         try:
+            cmd = f"while true; do cat /proc/net/tcp; sleep {self.polling_interval}; done"
             proc = subprocess.Popen(
-                ["wsl.exe", "-e", "bash", "~/bin/wsl_tcp_monitor.sh"],
+                ["wsl.exe", "-e", "bash", "-c", cmd],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW,
@@ -310,24 +287,10 @@ ENABLE_WSL_MONITORING = config["enable_wsl_monitoring"]
 pprint.pprint(config, sort_dicts=False)
 
 # ── Handler Instances ────────────────────────────────────────────────────────
-windows_handler = WindowsTcpHandler(
-    local_monitored_ports=LOCAL_MONITORED_PORTS,
-    remote_monitored_ports=REMOTE_MONITORED_PORTS,
-    local_ssh_ports=LOCAL_SSH_PORTS,
-    remote_ssh_ports=REMOTE_SSH_PORTS,
-    ssh_min_duration=SSH_MIN_DURATION,
-)
+windows_handler = WindowsTcpHandler(config)
 wsl_handler: WslTcpHandler | None = None
 if ENABLE_WSL_MONITORING:
-    wsl_handler = WslTcpHandler(
-        local_monitored_ports=LOCAL_MONITORED_PORTS,
-        remote_monitored_ports=REMOTE_MONITORED_PORTS,
-        local_ssh_ports=LOCAL_SSH_PORTS,
-        remote_ssh_ports=REMOTE_SSH_PORTS,
-        ssh_min_duration=SSH_MIN_DURATION,
-        polling_interval=POLLING_INTERVAL,
-        enable_wsl_monitoring=ENABLE_WSL_MONITORING,
-    )
+    wsl_handler = WslTcpHandler(config)
 
 
 # ── Shared Logic ─────────────────────────────────────────────────────────────
@@ -386,14 +349,6 @@ def format_active_connections(connections: list[dict], show_wsl_label: bool = Tr
         prefix = (f"[{conn['is_wsl'] and 'wsl' or 'win'}] " if show_wsl_label else "")
         strs.append(f"  {prefix}{conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
     return strs
-
-
-ES_CONTINUOUS = 0x80000000
-ES_SYSTEM_REQUIRED = 0x00000001
-AF_INET = 2
-TCP_TABLE_OWNER_PID_ALL = 5
-ERROR_INSUFFICIENT_BUFFER = 122
-MIB_TCP_STATE_ESTAB = 5
 
 
 def acquire():
