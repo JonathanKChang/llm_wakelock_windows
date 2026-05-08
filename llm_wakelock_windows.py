@@ -33,6 +33,15 @@ class TcpConnectionSource(Protocol):
     def get_connections(self) -> list[dict]: ...
 
 
+# Connection dict schema (returned by TcpConnectionSource.get_connections()):
+#   state       (int)   — TCP state code (5 = ESTABLISHED)
+#   local_addr  (str)   — dotted IPv4 address
+#   local_port  (int)   — local port number
+#   remote_addr (str)   — dotted IPv4 address
+#   remote_port (int)   — remote port number
+#   is_wsl      (bool)  — True if from WSL2, False if from Windows
+
+
 if sys.platform != "win32":
     print("Error: this script requires Windows", file=sys.stderr)
     sys.exit(1)
