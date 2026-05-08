@@ -20,11 +20,22 @@ import struct
 import datetime
 import tomllib
 import os
-import pprint
 import subprocess
 import threading
 import queue
 from typing import Protocol
+
+
+# ── Defaults ──────────────────────────────────────────────────────────────────
+DEFAULTS = {
+    "local_monitored_ports": [8080, 11434],
+    "remote_monitored_ports": [8080, 11434],
+    "local_ssh_ports": [],
+    "remote_ssh_ports": [],
+    "ssh_min_duration": 30.0,
+    "polling_interval": 5.0,
+    "wsl_monitoring": False,
+}
 
 
 class TcpConnectionSource(Protocol):
@@ -47,7 +58,7 @@ class TcpConnectionMonitor:
     def __init__(self, config: dict) -> None:
         self._config = config
         self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
-        if config["enable_wsl_monitoring"]:
+        if config["wsl_monitoring"]:
             self._handlers.append(WslTcpHandler(config))
         self._ssh_start_times: dict = {}
 
@@ -317,7 +328,7 @@ class WslTcpHandler:
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from the WSL subprocess."""
-        if not self._config["enable_wsl_monitoring"]:
+        if not self._config["wsl_monitoring"]:
             return []
 
         # Ensure subprocess is running
@@ -341,33 +352,9 @@ class WslTcpHandler:
                 continue
             if self._tcp_state_is_active(parsed["state"]):
                 connections.append(parsed)
-        return connections
 
-
-
-
-
-# ── Configuration ──────────────────────────────────────────────────────────────
-# Defaults — override by placing config.toml next to this script.
-DEFAULTS = {
-    "local_monitored_ports": [8080, 11434],
-    "remote_monitored_ports": [8080, 11434],
-    "local_ssh_ports": [],
-    "remote_ssh_ports": [],
-    "ssh_min_duration": 30.0,
-    "polling_interval": 5.0,
-    "enable_wsl_monitoring": False,
-}
-
-_config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml")
-with open(_config_path, "rb") as f:
-    user_cfg = tomllib.load(f)
-
-config = {**DEFAULTS, **user_cfg}
-pprint.pprint(config, sort_dicts=False)
 
 # ── Entry point ──────────────────────────────────────────────────────────────
-monitor = TcpConnectionMonitor(config)
-
 if __name__ == "__main__":
-    monitor.run()
+    main()
+
