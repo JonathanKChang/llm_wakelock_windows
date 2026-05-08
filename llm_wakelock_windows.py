@@ -310,238 +310,87 @@ ENABLE_WSL_MONITORING = config["enable_wsl_monitoring"]
 
 pprint.pprint(config, sort_dicts=False)
 
-# ── WSL Subprocess State ──────────────────────────────────────────────────────
-wsl_process = None
-wsl_stdout_queue = queue.Queue()
-wsl_stdout_thread = None
-wsl_helper_deployed = False
-wsl_warning_issued = False
+# ── Handler Instances ────────────────────────────────────────────────────────
+windows_handler = WindowsTcpHandler(
+    local_monitored_ports=LOCAL_MONITORED_PORTS,
+    remote_monitored_ports=REMOTE_MONITORED_PORTS,
+    local_ssh_ports=LOCAL_SSH_PORTS,
+    remote_ssh_ports=REMOTE_SSH_PORTS,
+    ssh_min_duration=SSH_MIN_DURATION,
+)
+wsl_handler: WslTcpHandler | None = None
+if ENABLE_WSL_MONITORING:
+    wsl_handler = WslTcpHandler(
+        local_monitored_ports=LOCAL_MONITORED_PORTS,
+        remote_monitored_ports=REMOTE_MONITORED_PORTS,
+        local_ssh_ports=LOCAL_SSH_PORTS,
+        remote_ssh_ports=REMOTE_SSH_PORTS,
+        ssh_min_duration=SSH_MIN_DURATION,
+        polling_interval=POLLING_INTERVAL,
+        enable_wsl_monitoring=ENABLE_WSL_MONITORING,
+    )
 
 
-def _wsl_run_command(cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
-    """Run a command inside WSL via wsl.exe. Returns CompletedProcess or None on failure."""
-    try:
-        result = subprocess.run(
-            ["wsl.exe", "-e", "bash", "-c", cmd],
-            capture_output=True,
-            text=True,
-            timeout=10,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if check and result.returncode != 0:
-            return None
-        return result
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
+# ── Shared Logic ─────────────────────────────────────────────────────────────
 
-
-def deploy_wsl_helper() -> bool:
-    """Deploy the bash helper script to WSL at ~/bin/wsl_tcp_monitor.sh.
-
-    Returns True if deployment succeeded, False otherwise.
-    """
-    global wsl_helper_deployed
-    if wsl_helper_deployed:
-        return True
-
-    script_content = f"""while true; do
-  cat /proc/net/tcp
-  sleep {POLLING_INTERVAL}
-done
-"""
-    # Use a heredoc to write the loop script inside WSL
-    cmd = f'mkdir -p ~/bin && cat > ~/bin/wsl_tcp_monitor.sh << \'WSL_HELPER_EOF\'\n{script_content}WSL_HELPER_EOF\nchmod +x ~/bin/wsl_tcp_monitor.sh'
-    result = _wsl_run_command(cmd)
-    if result and result.returncode == 0:
-        wsl_helper_deployed = True
-        return True
+def is_monitored_active(connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
+    """Check if any connection matches monitored ports (works with any source)."""
+    for conn in connections:
+        if conn["local_port"] in local_ports:
+            return True
+        if conn["remote_port"] in remote_ports:
+            return True
     return False
 
 
-def wsl_helper_available() -> bool:
-    """Check if wsl.exe is available and the helper script exists in WSL."""
-    # First check if wsl.exe exists
-    if _wsl_run_command("echo ok") is None:
-        return False
-    # Check if the helper script exists
-    result = _wsl_run_command("test -f ~/bin/wsl_tcp_monitor.sh && echo yes", check=False)
-    return result is not None and result.stdout.strip() == "yes"
+def is_ssh_active(connections: list[dict], ssh_start_times: dict, local_ports: list[int], remote_ports: list[int], min_duration: float) -> bool:
+    """Check if any SSH connections have been active for at least min_duration.
 
-
-def _stdout_reader(process: subprocess.Popen) -> None:
-    """Daemon thread that reads from subprocess stdout and puts lines into the queue."""
-    try:
-        for line in process.stdout:
-            wsl_stdout_queue.put(line)
-    except Exception:
-        pass
-
-
-def _start_wsl_subprocess() -> subprocess.Popen | None:
-    """Spawn the persistent WSL subprocess. Returns Popen object or None on failure."""
-    global wsl_stdout_thread
-    try:
-        proc = subprocess.Popen(
-            ["wsl.exe", "-e", "bash", "~/bin/wsl_tcp_monitor.sh"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,  # line-buffered
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        # Start a daemon thread to read stdout into the queue
-        wsl_stdout_thread = threading.Thread(target=_stdout_reader, args=(proc,), daemon=True)
-        wsl_stdout_thread.start()
-        return proc
-    except (FileNotFoundError, OSError):
-        return None
-
-
-def _wsl_subprocess_alive(process: subprocess.Popen) -> bool:
-    """Check if the WSL subprocess is still running."""
-    return process is not None and process.poll() is None
-
-
-def _ensure_wsl_subprocess() -> subprocess.Popen | None:
-    """Ensure the WSL subprocess is running. Start or restart as needed."""
-    global wsl_process
-    if _wsl_subprocess_alive(wsl_process):
-        return wsl_process
-    # Process is dead or not started — try to start it
-    wsl_process = _start_wsl_subprocess()
-    return wsl_process
-
-
-def _drain_wsl_output() -> list[str]:
-    """Drain all available lines from the subprocess stdout queue (non-blocking)."""
-    lines = []
-    while not wsl_stdout_queue.empty():
-        try:
-            lines.append(wsl_stdout_queue.get_nowait())
-        except queue.Empty:
-            break
-    return lines
-
-
-# ── WSL TCP Parsing ──────────────────────────────────────────────────────────
-_HEADER_KEYWORD = "local_address"
-
-
-def _parse_proc_net_tcp_line(line: str) -> dict | None:
-    """Parse a single /proc/net/tcp line into a connection dict.
-
-    Returns None for header lines or malformed lines.
-    Format: <sl> <local_addr>:<local_port> <remote_addr>:<remote_port> <state> ...
-    All addresses and ports are hex-encoded.
+    Tracks each connection by (local_port, remote_port, remote_addr) — no PID.
+    Prunes stale entries when a connection drops.
     """
-    line = line.strip()
-    if not line or _HEADER_KEYWORD in line:
-        return None
-
-    parts = line.split()
-    if len(parts) < 4:
-        return None
-
-    try:
-        # parts[1] = local_addr:port, parts[2] = remote_addr:port, parts[3] = state
-        local_hex = parts[1]
-        remote_hex = parts[2]
-        state_hex = parts[3]
-
-        local_addr_hex, local_port_hex = local_hex.rsplit(":", 1)
-        remote_addr_hex, remote_port_hex = remote_hex.rsplit(":", 1)
-
-        local_port = int(local_port_hex, 16)
-        remote_port = int(remote_port_hex, 16)
-        state = int(state_hex, 16)
-
-        # Convert hex addresses to dotted notation (little-endian)
-        local_addr_int = int(local_addr_hex, 16)
-        remote_addr_int = int(remote_addr_hex, 16)
-        local_addr = socket.inet_ntoa(struct.pack("<I", local_addr_int))
-        remote_addr = socket.inet_ntoa(struct.pack("<I", remote_addr_int))
-
-        return {
-            "state": state,
-            "local_addr": local_addr,
-            "local_port": local_port,
-            "remote_addr": remote_addr,
-            "remote_port": remote_port,
-            "pid": 0,  # WSL /proc/net/tcp doesn't expose PID
-        }
-    except (ValueError, IndexError):
-        return None
-
-
-def _tcp_state_is_active(state_hex: int) -> bool:
-    """Return True only for ESTABLISHED (0x01), mirroring Windows iphlpapi logic."""
-    return state_hex == 0x01
-
-
-def get_wsl_tcp_connections() -> list[dict]:
-    """Get active TCP connections from the WSL subprocess.
-
-    Drains the subprocess pipe, parses lines, filters for active connections,
-    and returns a list of connection dicts matching the Windows connection schema.
-    Handles subprocess death by restarting and returning empty list for this cycle.
-    """
-    global wsl_process, wsl_warning_issued
-
-    # Ensure subprocess is running
-    if not _wsl_subprocess_alive(wsl_process):
-        wsl_process = _start_wsl_subprocess()
-        if wsl_process is None:
-            # wsl.exe not available — log once and skip
-            if not wsl_warning_issued:
-                print("[wsl] wsl.exe not available, skipping WSL monitoring")
-                wsl_warning_issued = True
-            return []
-
-    # Drain available lines from the queue
-    lines = _drain_wsl_output()
-
-    # If no lines and process is dead, restart
-    if not lines and not _wsl_subprocess_alive(wsl_process):
-        wsl_process = _start_wsl_subprocess()
-        return []
-
-    # Parse lines into connections
-    connections = []
-    for line in lines:
-        parsed = _parse_proc_net_tcp_line(line)
-        if parsed is None:
-            continue
-        if _tcp_state_is_active(parsed["state"]):
-            connections.append(parsed)
-
-    return connections
-
-
-# ── WSL Monitoring Integration ───────────────────────────────────────────────
-
-def is_wsl_monitored_active(connections: list[dict]) -> bool:
-    """Check if any WSL connections match monitored ports."""
+    now = time.time()
+    active_keys = set()
     for conn in connections:
-        if conn["local_port"] in LOCAL_MONITORED_PORTS:
-            return True
-        if conn["remote_port"] in REMOTE_MONITORED_PORTS:
-            return True
+        if conn["local_port"] in local_ports or conn["remote_port"] in remote_ports:
+            key = (conn["local_port"], conn["remote_port"], conn["remote_addr"])
+            active_keys.add(key)
+            if key not in ssh_start_times:
+                ssh_start_times[key] = now
+            elif now - ssh_start_times[key] >= min_duration:
+                return True
+    for key in list(ssh_start_times):
+        if key not in active_keys:
+            del ssh_start_times[key]
     return False
 
 
 def has_active_connections(ssh_start_times: dict) -> bool:
-    """Checks for active monitored-port or SSH connections (Windows + WSL2)."""
-    # Windows connections
-    windows_connections = get_established_tcp_connections()
-    windows_active = is_monitored_active(windows_connections) or is_ssh_active(windows_connections, ssh_start_times)
+    """Check for active monitored-port or SSH connections (Windows + WSL2)."""
+    windows_connections = windows_handler.get_connections()
+    windows_active = is_monitored_active(windows_connections, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) or \
+                     is_ssh_active(windows_connections, ssh_start_times, LOCAL_SSH_PORTS, REMOTE_SSH_PORTS, SSH_MIN_DURATION)
 
-    # WSL connections (only if enabled)
     wsl_active = False
-    if ENABLE_WSL_MONITORING:
-        wsl_connections = get_wsl_tcp_connections()
-        wsl_active = is_wsl_monitored_active(wsl_connections) or is_ssh_active(wsl_connections, ssh_start_times)
+    if wsl_handler is not None:
+        wsl_connections = wsl_handler.get_connections()
+        wsl_active = is_monitored_active(wsl_connections, LOCAL_MONITORED_PORTS, REMOTE_MONITORED_PORTS) or \
+                     is_ssh_active(wsl_connections, ssh_start_times, LOCAL_SSH_PORTS, REMOTE_SSH_PORTS, SSH_MIN_DURATION)
 
     return windows_active or wsl_active
+
+
+def format_active_connections(connections: list[dict], show_wsl_label: bool = True) -> list[str]:
+    """Format active connection dicts into log strings."""
+    strs = []
+    for conn in connections:
+        if show_wsl_label:
+            prefix = "[wsl]" if conn.get("is_wsl") else "[win]"
+        else:
+            prefix = ""
+        strs.append(f"  {prefix} {conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
+    return strs
+
 
 ES_CONTINUOUS = 0x80000000
 ES_SYSTEM_REQUIRED = 0x00000001
@@ -563,122 +412,35 @@ def release():
 
     # Pulse the wake-lock flag briefly to reset idle timer
     ctypes.windll.kernel32.SetThreadExecutionState(ES_SYSTEM_REQUIRED)
-    
+
     ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
-
-
-def get_established_tcp_connections():
-    """Retrieve all established TCP connections with owner PID details."""
-    iphlpapi = ctypes.windll.iphlpapi
-    size = ctypes.c_ulong(0)
-    ret = iphlpapi.GetExtendedTcpTable(
-        None, ctypes.byref(size), True, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
-    )
-    if ret != ERROR_INSUFFICIENT_BUFFER:
-        raise OSError(f"Unexpected error querying TCP table size: {ret}")
-
-    buf = ctypes.create_string_buffer(size.value)
-    ret = iphlpapi.GetExtendedTcpTable(
-        buf, ctypes.byref(size), True, AF_INET, TCP_TABLE_OWNER_PID_ALL, 0
-    )
-    if ret != 0:
-        raise OSError(f"GetExtendedTcpTable failed: {ret}")
-
-    class MIB_TCPROW_OWNER_PID(ctypes.Structure):
-        _fields_ = [
-            ("dwState", ctypes.c_ulong),
-            ("dwLocalAddr", ctypes.c_ulong),
-            ("dwLocalPort", ctypes.c_ulong),
-            ("dwRemoteAddr", ctypes.c_ulong),
-            ("dwRemotePort", ctypes.c_ulong),
-            ("dwOwningPid", ctypes.c_ulong),
-        ]
-
-    num_entries = ctypes.c_ulong.from_buffer(buf).value
-    row_start = ctypes.addressof(buf) + ctypes.sizeof(ctypes.c_ulong)
-    row_ptr = ctypes.cast(row_start, ctypes.POINTER(MIB_TCPROW_OWNER_PID))
-
-    connections = []
-    for i in range(num_entries):
-        row = row_ptr[i]
-        if row.dwState != MIB_TCP_STATE_ESTAB:
-            continue
-        connections.append({
-            "state": row.dwState,
-            "local_addr": socket.inet_ntoa(struct.pack("<L", row.dwLocalAddr)),
-            "local_port": socket.ntohs(row.dwLocalPort & 0xFFFF),
-            "remote_addr": socket.inet_ntoa(struct.pack("<L", row.dwRemoteAddr)),
-            "remote_port": socket.ntohs(row.dwRemotePort & 0xFFFF),
-            "pid": row.dwOwningPid,
-        })
-    return connections
-
-
-def is_monitored_active(connections):
-    """Checks if any monitored-port connections are active (instant detection)."""
-    for conn in connections:
-        if conn["local_port"] in LOCAL_MONITORED_PORTS:
-            return True
-        if conn["remote_port"] in REMOTE_MONITORED_PORTS:
-            return True
-    return False
-
-
-def is_ssh_active(connections, ssh_start_times):
-    """Checks if any SSH connections have been active for at least SSH_MIN_DURATION.
-
-    Tracks each connection by (pid, local_port, remote_port, remote_addr).
-    Prunes stale entries when a connection drops, so a reconnect starts a
-    fresh timer. Does not account for connection state changes beyond the
-    initial ESTABLISHED detection.
-    """
-    now = time.time()
-    active_keys = set()
-    for conn in connections:
-        if conn["local_port"] in LOCAL_SSH_PORTS or conn["remote_port"] in REMOTE_SSH_PORTS:
-            # Include remote_addr in the key to distinguish SSH sessions to
-            # different hosts, even if they share the same port numbers.
-            key = (conn["pid"], conn["local_port"], conn["remote_port"], conn["remote_addr"])
-            active_keys.add(key)
-            if key not in ssh_start_times:
-                ssh_start_times[key] = now
-            elif now - ssh_start_times[key] >= SSH_MIN_DURATION:
-                return True
-    # Prune stale entries for connections that are no longer established
-    for key in list(ssh_start_times):
-        if key not in active_keys:
-            del ssh_start_times[key]
-    return False
 
 
 wakelock = False
 ssh_start_times = {}
 
 while True:
-    # Get current connections
-    windows_connections = get_established_tcp_connections()
     active = has_active_connections(ssh_start_times)
     now = datetime.datetime.now().isoformat()
 
     if active and not wakelock:
         acquire()
-        # Collect relevant connection info from both Windows and WSL2
-        relevant_strs = []
-        for conn in windows_connections:
+        # Collect relevant connections from both sources
+        relevant_conns = []
+        for conn in windows_handler.get_connections():
             if (conn["local_port"] in LOCAL_MONITORED_PORTS
                     or conn["remote_port"] in REMOTE_MONITORED_PORTS
                     or conn["local_port"] in LOCAL_SSH_PORTS
                     or conn["remote_port"] in REMOTE_SSH_PORTS):
-                relevant_strs.append(f"  [win] {conn}")
-        if ENABLE_WSL_MONITORING:
-            wsl_connections = get_wsl_tcp_connections()
-            for conn in wsl_connections:
+                relevant_conns.append(conn)
+        if wsl_handler is not None:
+            for conn in wsl_handler.get_connections():
                 if (conn["local_port"] in LOCAL_MONITORED_PORTS
                         or conn["remote_port"] in REMOTE_MONITORED_PORTS
                         or conn["local_port"] in LOCAL_SSH_PORTS
                         or conn["remote_port"] in REMOTE_SSH_PORTS):
-                    relevant_strs.append(f"  [wsl] {conn}")
-        print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(relevant_strs))
+                    relevant_conns.append(conn)
+        print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(format_active_connections(relevant_conns)))
         wakelock = True
 
     elif not active and wakelock:
