@@ -106,6 +106,178 @@ class WindowsTcpHandler:
         return connections
 
 
+class WslTcpHandler:
+    """Handles WSL2 TCP connection retrieval via persistent subprocess."""
+
+    def __init__(
+        self,
+        local_monitored_ports: list[int],
+        remote_monitored_ports: list[int],
+        local_ssh_ports: list[int],
+        remote_ssh_ports: list[int],
+        ssh_min_duration: float,
+        polling_interval: float,
+        enable_wsl_monitoring: bool,
+    ) -> None:
+        self.local_monitored_ports = local_monitored_ports
+        self.remote_monitored_ports = remote_monitored_ports
+        self.local_ssh_ports = local_ssh_ports
+        self.remote_ssh_ports = remote_ssh_ports
+        self.ssh_min_duration = ssh_min_duration
+        self.polling_interval = polling_interval
+        self.enable_wsl_monitoring = enable_wsl_monitoring
+        self._process: subprocess.Popen | None = None
+        self._stdout_queue: queue.Queue[str] = queue.Queue()
+        self._stdout_thread: threading.Thread | None = None
+        self._helper_deployed = False
+        self._warning_issued = False
+
+    def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
+        """Run a command inside WSL via wsl.exe."""
+        try:
+            result = subprocess.run(
+                ["wsl.exe", "-e", "bash", "-c", cmd],
+                capture_output=True, text=True, timeout=10,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            if check and result.returncode != 0:
+                return None
+            return result
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+
+    def _deploy_helper(self) -> bool:
+        """Deploy the bash helper script to WSL."""
+        if self._helper_deployed:
+            return True
+        script_content = (f"while true; do\n"
+                          f"  cat /proc/net/tcp\n"
+                          f"  sleep {self.polling_interval}\n"
+                          f"done\n")
+        cmd = (f'mkdir -p ~/bin && cat > ~/bin/wsl_tcp_monitor.sh << \'WSL_HELPER_EOF\'\n'
+               f'{script_content}WSL_HELPER_EOF\nchmod +x ~/bin/wsl_tcp_monitor.sh')
+        result = self._run_command(cmd)
+        if result and result.returncode == 0:
+            self._helper_deployed = True
+            return True
+        return False
+
+    def _helper_available(self) -> bool:
+        """Check if wsl.exe is available and the helper script exists."""
+        if self._run_command("echo ok") is None:
+            return False
+        result = self._run_command("test -f ~/bin/wsl_tcp_monitor.sh && echo yes", check=False)
+        return result is not None and result.stdout.strip() == "yes"
+
+    def _stdout_reader(self, process: subprocess.Popen) -> None:
+        """Daemon thread that reads subprocess stdout into the queue."""
+        try:
+            for line in process.stdout:
+                self._stdout_queue.put(line)
+        except Exception:
+            pass
+
+    def _start_subprocess(self) -> subprocess.Popen | None:
+        """Spawn the persistent WSL subprocess."""
+        try:
+            proc = subprocess.Popen(
+                ["wsl.exe", "-e", "bash", "~/bin/wsl_tcp_monitor.sh"],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            self._stdout_thread = threading.Thread(
+                target=self._stdout_reader, args=(proc,), daemon=True
+            )
+            self._stdout_thread.start()
+            return proc
+        except (FileNotFoundError, OSError):
+            return None
+
+    def _subprocess_alive(self, process: subprocess.Popen) -> bool:
+        """Check if the WSL subprocess is still running."""
+        return process is not None and process.poll() is None
+
+    def _ensure_subprocess(self) -> subprocess.Popen | None:
+        """Ensure the WSL subprocess is running."""
+        if self._subprocess_alive(self._process):
+            return self._process
+        self._process = self._start_subprocess()
+        return self._process
+
+    def _drain_output(self) -> list[str]:
+        """Drain all available lines from the subprocess stdout queue."""
+        lines = []
+        while not self._stdout_queue.empty():
+            try:
+                lines.append(self._stdout_queue.get_nowait())
+            except queue.Empty:
+                break
+        return lines
+
+    @staticmethod
+    def _parse_proc_net_tcp_line(line: str) -> dict | None:
+        """Parse a single /proc/net/tcp line into a connection dict."""
+        line = line.strip()
+        if not line or "local_address" in line:
+            return None
+        parts = line.split()
+        if len(parts) < 4:
+            return None
+        try:
+            local_hex, remote_hex, state_hex = parts[1], parts[2], parts[3]
+            local_addr_hex, local_port_hex = local_hex.rsplit(":", 1)
+            remote_addr_hex, remote_port_hex = remote_hex.rsplit(":", 1)
+            local_port = int(local_port_hex, 16)
+            remote_port = int(remote_port_hex, 16)
+            state = int(state_hex, 16)
+            local_addr = socket.inet_ntoa(struct.pack("<I", int(local_addr_hex, 16)))
+            remote_addr = socket.inet_ntoa(struct.pack("<I", int(remote_addr_hex, 16)))
+            return {
+                "state": state,
+                "local_addr": local_addr,
+                "local_port": local_port,
+                "remote_addr": remote_addr,
+                "remote_port": remote_port,
+                "is_wsl": True,
+            }
+        except (ValueError, IndexError):
+            return None
+
+    @staticmethod
+    def _tcp_state_is_active(state_hex: int) -> bool:
+        """Return True only for ESTABLISHED (0x01)."""
+        return state_hex == 0x01
+
+    def get_connections(self) -> list[dict]:
+        """Get active TCP connections from the WSL subprocess."""
+        if not self.enable_wsl_monitoring:
+            return []
+
+        # Ensure subprocess is running
+        if not self._subprocess_alive(self._process):
+            self._process = self._start_subprocess()
+            if self._process is None:
+                if not self._warning_issued:
+                    print("[wsl] wsl.exe not available, skipping WSL monitoring")
+                    self._warning_issued = True
+                return []
+
+        lines = self._drain_output()
+        if not lines and not self._subprocess_alive(self._process):
+            self._process = self._start_subprocess()
+            return []
+
+        connections = []
+        for line in lines:
+            parsed = self._parse_proc_net_tcp_line(line)
+            if parsed is None:
+                continue
+            if self._tcp_state_is_active(parsed["state"]):
+                connections.append(parsed)
+        return connections
+
+
 if sys.platform != "win32":
     print("Error: this script requires Windows", file=sys.stderr)
     sys.exit(1)
