@@ -349,10 +349,9 @@ class WslTcpConnectionHandler:
         if not self._subprocess_alive(self._process):
             self._process = self._start_subprocess()
             if self._process is None:
-                if not self._warning_issued:
+                if not self.unavailable:
                     self.unavailable = True
-                    print("[wsl.exe not available]")
-                    self._warning_issued = True
+                    print("[WARN] wsl.exe not available — WSL connections will not be monitored")
                 return []
 
         lines = self._drain_output()
@@ -367,10 +366,9 @@ class WslTcpConnectionHandler:
                 self._header_seen = True
                 break
         if lines and not self._header_seen:
-            if not self._warning_issued:
+            if not self.unavailable:
                 self.unavailable = True
-                print("[/proc/net/tcp missing header]")
-                self._warning_issued = True
+                print("[WARN] /proc/net/tcp missing header — connections will not be monitored")
             return []
 
         connections = []
@@ -391,7 +389,7 @@ class WslTcpHandler(WslTcpConnectionHandler):
         super().__init__(config, cmd)
         if not self._wsl_available():
             self.unavailable = True
-            print("[wsl.exe not reachable]")
+            print("[WARN] wsl.exe not reachable — WSL connections will not be monitored")
 
     def _wsl_available(self) -> bool:
         """Check if wsl.exe is reachable."""
@@ -420,7 +418,7 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         # Check docker accessibility
         if self._run_command(f"docker exec {short_id} echo ok", check=True) is None:
             self.unavailable = True
-            print(f"[docker container {short_id} not accessible]")
+            print(f"[WARN] docker container {short_id} not accessible — this container will not be monitored")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from Docker container."""
@@ -440,7 +438,6 @@ class WslDockerManager(TcpConnectionSource):
         self._config = config
         self.unavailable: bool = False
         self._container_handlers: list[WslDockerTcpHandler] = []
-        self._warning_issued = False
         self._discover_containers()
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
@@ -464,18 +461,17 @@ class WslDockerManager(TcpConnectionSource):
             return
         result = self._run_command("docker ps --format '{{.ID}}'", check=True)
         if result is None or result.returncode != 0:
-            if not self._warning_issued:
+            if not self.unavailable:
                 self.unavailable = True
-                print("[docker not available in WSL]")
-                self._warning_issued = True
+                print("[WARN] docker not available in WSL — Docker connections will not be monitored")
             return
         container_ids = [cid.strip() for cid in result.stdout.strip().split("\n") if cid.strip()]
         for cid in container_ids[:max_containers]:
             handler = WslDockerTcpHandler(self._config, cid)
             if not handler.unavailable:
                 self._container_handlers.append(handler)
-            elif not self._warning_issued:
-                self._warning_issued = True
+            else:
+                self.unavailable = True
 
     def get_connections(self) -> list[dict]:
         """Aggregate connections from all container handlers."""
