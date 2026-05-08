@@ -43,6 +43,7 @@ Copy `config.toml` from the script directory and uncomment the values you want t
 | `ssh_min_duration` | `30.0` | Min SSH session duration (seconds) |
 | `polling_interval` | `5.0` | Polling interval (seconds) |
 | `wsl_monitoring` | `false` | Monitor WSL2 TCP connections |
+| `wsl_docker_monitoring_max` | `0` | Max Docker containers to monitor (0 = disabled) |
 
 Example `config.toml`:
 
@@ -50,14 +51,6 @@ Example `config.toml`:
 # Uncomment and change to override defaults
 # local_monitored_ports = [8080, 11434]
 # ssh_min_duration = 30.0
-```
-
-### Adding a new service
-
-Add its port to the monitored port lists:
-
-```toml
-local_monitored_ports = [8080, 11434, 5432]  # llama.cpp + Ollama + local PostgreSQL
 ```
 
 ### Adding a new service
@@ -78,6 +71,18 @@ remote_ssh_ports = [22]
 ```
 
 > **Warning:** Before adding ports to `local_ssh_ports`, verify your incoming SSH TCP connection behavior. Many systems leave SSH sessions open indefinitely (depending on SSH and kernel TCP keepalive settings), which would prevent your machine from ever sleeping.
+
+### Docker container monitoring
+
+Monitor Docker containers running inside WSL by setting `wsl_docker_monitoring_max` to a positive number. The tool auto-discovers running containers via `docker ps` at startup and spawns a persistent subprocess per container to read `/proc/net/tcp`.
+
+```toml
+wsl_docker_monitoring_max = 5  # monitor up to 5 containers
+```
+
+> **Note:** Container discovery runs once at startup. New containers started after the daemon begins are **not** picked up — restart the daemon to pick up new containers.
+
+> **Note:** Connections are labeled `[docker:<container_id>]` in the output.
 
 
 ## Files

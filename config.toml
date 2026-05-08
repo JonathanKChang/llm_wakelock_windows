@@ -30,3 +30,9 @@
 # When enabled, the same port/SSH config applies to both Windows and WSL2 connections.
 # Default: false
 # wsl_monitoring = false
+
+# Number of Docker containers to monitor in WSL (0 = disabled).
+# Containers are auto-discovered via docker ps at startup.
+# New containers started after the daemon begins are NOT picked up.
+# Default: 0
+# wsl_docker_monitoring_max = 0
