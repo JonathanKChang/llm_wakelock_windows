@@ -44,6 +44,55 @@ class TcpConnectionMonitor:
     TCP_TABLE_OWNER_PID_ALL = 5
     ERROR_INSUFFICIENT_BUFFER = 122
 
+    def __init__(self, config: dict) -> None:
+        self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
+        if config["enable_wsl_monitoring"]:
+            self._handlers.append(WslTcpHandler(config))
+        self._ssh_start_times: dict = {}
+        self._local_monitored_ports = config["local_monitored_ports"]
+        self._remote_monitored_ports = config["remote_monitored_ports"]
+        self._local_ssh_ports = config["local_ssh_ports"]
+        self._remote_ssh_ports = config["remote_ssh_ports"]
+        self._ssh_min_duration = config["ssh_min_duration"]
+
+    def is_monitored_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
+        """Check if any connection matches monitored ports (works with any source)."""
+        for conn in connections:
+            if conn["local_port"] in local_ports:
+                return True
+            if conn["remote_port"] in remote_ports:
+                return True
+        return False
+
+    def is_ssh_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int], min_duration: float) -> bool:
+        """Check if any SSH connections have been active for at least min_duration.
+
+        Tracks each connection by (local_addr, local_port, remote_port, remote_addr).
+        Prunes stale entries when a connection drops.
+        """
+        now = time.time()
+        active_keys = set()
+        for conn in connections:
+            if conn["local_port"] in local_ports or conn["remote_port"] in remote_ports:
+                key = (conn["local_addr"], conn["local_port"], conn["remote_port"], conn["remote_addr"])
+                active_keys.add(key)
+                if key not in self._ssh_start_times:
+                    self._ssh_start_times[key] = now
+                elif now - self._ssh_start_times[key] >= min_duration:
+                    return True
+        for key in list(self._ssh_start_times):
+            if key not in active_keys:
+                del self._ssh_start_times[key]
+        return False
+
+    def format_active_connections(self, connections: list[dict], show_wsl_label: bool = True) -> list[str]:
+        """Format active connection dicts into log strings."""
+        strs = []
+        for conn in connections:
+            prefix = (f"[{conn['is_wsl'] and 'wsl' or 'win'}] " if show_wsl_label else "")
+            strs.append(f"  {prefix}{conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
+        return strs
+
 
 # Connection dict schema (returned by TcpConnectionSource.get_connections()):
 #   state       (int)   — TCP state code (5 = ESTABLISHED)
