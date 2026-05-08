@@ -43,6 +43,7 @@ DEFAULTS = {
     "ssh_min_duration": 30.0,
     "polling_interval": 5.0,
     "wsl_monitoring": False,
+    "wsl_docker_monitoring_max": 0,
 }
 
 
@@ -70,6 +71,8 @@ class TcpConnectionMonitor:
         self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
         if config["wsl_monitoring"]:
             self._handlers.append(WslTcpHandler(config))
+        if config.get("wsl_docker_monitoring_max", 0) >= 1:
+            self._handlers.append(WslDockerManager(config))
         self._ssh_start_times: dict = {}
 
     def is_monitored_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
