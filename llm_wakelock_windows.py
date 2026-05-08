@@ -24,6 +24,7 @@ import pprint
 import subprocess
 import threading
 import queue
+from typing import Protocol
 
 if sys.platform != "win32":
     print("Error: this script requires Windows", file=sys.stderr)
