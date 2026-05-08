@@ -42,6 +42,24 @@ class TcpConnectionSource(Protocol):
 #   is_wsl      (bool)  — True if from WSL2, False if from Windows
 
 
+class WindowsTcpHandler:
+    """Handles Windows TCP connection retrieval via iphlpapi."""
+
+    def __init__(
+        self,
+        local_monitored_ports: list[int],
+        remote_monitored_ports: list[int],
+        local_ssh_ports: list[int],
+        remote_ssh_ports: list[int],
+        ssh_min_duration: float,
+    ) -> None:
+        self.local_monitored_ports = local_monitored_ports
+        self.remote_monitored_ports = remote_monitored_ports
+        self.local_ssh_ports = local_ssh_ports
+        self.remote_ssh_ports = remote_ssh_ports
+        self.ssh_min_duration = ssh_min_duration
+
+
 if sys.platform != "win32":
     print("Error: this script requires Windows", file=sys.stderr)
     sys.exit(1)
