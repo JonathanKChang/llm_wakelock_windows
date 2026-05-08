@@ -366,34 +366,8 @@ with open(_config_path, "rb") as f:
 config = {**DEFAULTS, **user_cfg}
 pprint.pprint(config, sort_dicts=False)
 
-# ── Module-level monitor instance (for test backward compatibility) ─────────
+# ── Entry point ──────────────────────────────────────────────────────────────
 monitor = TcpConnectionMonitor(config)
-
-
-# Thin wrappers for test backward compatibility (Phase 7 will remove these)
-def is_monitored_active(connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
-    return monitor.is_monitored_active(connections, local_ports, remote_ports)
-
-
-def is_ssh_active(connections: list[dict], ssh_start_times: dict, local_ports: list[int], remote_ports: list[int], min_duration: float) -> bool:
-    return monitor.is_ssh_active(connections, local_ports, remote_ports, min_duration)
-
-
-def has_active_connections(ssh_start_times: dict) -> bool:
-    return monitor.has_active_connections()
-
-
-def format_active_connections(connections: list[dict], show_wsl_label: bool = True) -> list[str]:
-    return monitor.format_active_connections(connections, show_wsl_label)
-
-
-def acquire() -> None:
-    monitor._acquire()
-
-
-def release() -> None:
-    monitor._release()
-
 
 if __name__ == "__main__":
     monitor.run()
