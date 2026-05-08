@@ -4,8 +4,10 @@
 - SSH tracking: duration tracking, stale-entry pruning, reconnect detection
 - WSL TCP parsing: /proc/net/tcp line parsing
 - Port monitoring: is_monitored_active, format_active_connections
+- Docker: container discovery, no-containers handling, docker labels
 """
 
+from unittest.mock import patch, MagicMock
 import time
 
 import llm_wakelock_windows as mod
@@ -188,3 +190,42 @@ def test_format_active_connections_with_labels():
     result = mon.format_active_connections(conns, show_source_label=False)
     assert result[0] == "  192.168.1.1:8080 -> 10.0.0.1:12345"
     assert result[1] == "  0.0.0.0:11434 -> 172.17.0.1:54321"
+
+
+def test_format_active_connections_docker_label():
+    """Test docker:container_id label in format_active_connections."""
+    mon = _monitor()
+    conns = [
+        {"local_addr": "172.17.0.2", "local_port": 5432, "remote_addr": "10.0.0.1", "remote_port": 80,
+         "source": _C.WSL_DOCKER, "container_id": "abc123def456"},
+    ]
+    result = mon.format_active_connections(conns, show_source_label=True)
+    assert result[0] == "  [docker:abc123def456] 172.17.0.2:5432 -> 10.0.0.1:80"
+
+
+# ── Docker Tests ─────────────────────────────────────────────────────────────
+
+
+def test_docker_container_discovery_respects_max():
+    """Docker discovery caps handlers at wsl_docker_monitoring_max."""
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "abc123\ndef456\nghi789\n"
+    with patch("llm_wakelock_windows.subprocess.run", return_value=mock_result), \
+         patch.object(mod.subprocess, "CREATE_NO_WINDOW", 0, create=True):
+        config = {"wsl_docker_monitoring_max": 2, "polling_interval": 5.0}
+        manager = mod.WslDockerManager(config)
+        assert len(manager._container_handlers) == 2
+
+
+def test_docker_handler_no_containers():
+    """Docker manager returns empty list when no containers are running."""
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = ""
+    with patch("llm_wakelock_windows.subprocess.run", return_value=mock_result), \
+         patch.object(mod.subprocess, "CREATE_NO_WINDOW", 0, create=True):
+        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0}
+        manager = mod.WslDockerManager(config)
+        assert manager.get_connections() == []
+        assert manager.unavailable is None  # no containers != unavailable
