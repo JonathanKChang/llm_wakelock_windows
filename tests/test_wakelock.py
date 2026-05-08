@@ -11,9 +11,8 @@ from unittest.mock import patch, MagicMock
 import time
 
 import llm_wakelock_windows as mod
-
-_M = mod.TcpConnectionMonitor
-_C = mod.ConnectionSource
+import tcp_handlers
+from tcp_handlers import TcpConnectionMonitor as _M, ConnectionSource as _C, WslTcpHandler, WslDockerManager
 
 
 def _ssh_conn(local_addr, local_port, remote_port, remote_addr):
@@ -98,12 +97,12 @@ def test_non_ssh_port_ignored():
 
 def _parse_line(line: str):
     """Wrapper around production WslTcpConnectionHandler._parse_proc_net_tcp_line."""
-    return mod.WslTcpHandler._parse_proc_net_tcp_line(line)
+    return WslTcpHandler._parse_proc_net_tcp_line(line)
 
 
 def _tcp_state_is_active(state_hex: int) -> bool:
     """Wrapper around production WslTcpConnectionHandler._tcp_state_is_active."""
-    return mod.WslTcpHandler._tcp_state_is_active(state_hex)
+    return WslTcpHandler._tcp_state_is_active(state_hex)
 
 
 def test_parse_established_connection():
@@ -211,10 +210,10 @@ def test_docker_container_discovery_respects_max():
     mock_result = MagicMock()
     mock_result.returncode = 0
     mock_result.stdout = "abc123\ndef456\nghi789\n"
-    with patch("llm_wakelock_windows.subprocess.run", return_value=mock_result), \
-         patch.object(mod.subprocess, "CREATE_NO_WINDOW", 0, create=True):
+    with patch("tcp_handlers.subprocess.run", return_value=mock_result), \
+         patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
         config = {"wsl_docker_monitoring_max": 2, "polling_interval": 5.0}
-        manager = mod.WslDockerManager(config)
+        manager = WslDockerManager(config)
         assert len(manager._container_handlers) == 2
 
 
@@ -223,9 +222,9 @@ def test_docker_handler_no_containers():
     mock_result = MagicMock()
     mock_result.returncode = 0
     mock_result.stdout = ""
-    with patch("llm_wakelock_windows.subprocess.run", return_value=mock_result), \
-         patch.object(mod.subprocess, "CREATE_NO_WINDOW", 0, create=True):
+    with patch("tcp_handlers.subprocess.run", return_value=mock_result), \
+         patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
         config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0}
-        manager = mod.WslDockerManager(config)
+        manager = WslDockerManager(config)
         assert manager.get_connections() == []
         assert manager.unavailable is False  # no containers != unavailable

@@ -18,10 +18,6 @@ import datetime
 import tomllib
 import os
 import pprint
-import subprocess
-import socket
-import queue
-
 from tcp_handlers import (
     ConnectionSource,
     TcpConnectionSource,
@@ -30,19 +26,6 @@ from tcp_handlers import (
     WslTcpHandler,
     WslDockerManager,
 )
-
-# Re-export for backward compatibility (tests reference these via `mod.X`).
-__all__ = [
-    "ConnectionSource",
-    "TcpConnectionSource",
-    "TcpConnectionMonitor",
-    "WindowsTcpHandler",
-    "WslTcpHandler",
-    "WslDockerManager",
-    "subprocess",
-    "socket",
-    "queue",
-]
 
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULTS = {
