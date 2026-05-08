@@ -415,6 +415,30 @@ class WslTcpHandler(WslTcpConnectionHandler):
         return conns
 
 
+class WslDockerTcpHandler(WslTcpConnectionHandler):
+    """Handles TCP connections for a single Docker container in WSL."""
+
+    def __init__(self, config: dict, container_id: str) -> None:
+        short_id = container_id[:12]
+        cmd = f"docker exec {short_id} sh -c \"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done\""
+        super().__init__(config, cmd)
+        self._container_id = short_id
+        # Check docker accessibility
+        if self._run_command(f"docker exec {short_id} echo ok", check=True) is None:
+            self._unavailable = f"docker container {short_id} not accessible"
+            print(f"[{self._unavailable}]")
+
+    def get_connections(self) -> list[dict]:
+        """Get active TCP connections from Docker container."""
+        if self._unavailable:
+            return []
+        conns = super().get_connections()
+        for c in conns:
+            c["source"] = ConnectionSource.WSL_DOCKER
+            c["container_id"] = self._container_id
+        return conns
+
+
 # ── Configuration ──────────────────────────────────────────────────────────────
 
 def load_config() -> dict:
