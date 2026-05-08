@@ -114,7 +114,6 @@ def test_parse_established_connection():
     assert result["state"] == _M.ESTABLISHED
     assert result["local_addr"] == "0.0.0.0"
     assert result["remote_addr"] == "10.0.0.5"
-    assert result["source"] == _C.WSL
 
 
 def test_parse_time_wait():

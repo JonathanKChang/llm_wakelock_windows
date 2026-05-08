@@ -239,26 +239,36 @@ class WindowsTcpHandler:
         return connections
 
 
-class WslTcpHandler:
-    """Handles WSL TCP connection retrieval via persistent subprocess."""
+class WslTcpConnectionHandler:
+    """Base class for WSL TCP connection retrieval via persistent subprocess."""
 
-    def __init__(self, config: dict) -> None:
+    ESTABLISHED = 0x01
+    TCP_STATES = {
+        0x01: "ESTABLISHED", 0x02: "SYN_SENT", 0x03: "SYN_RECV",
+        0x04: "FIN_WAIT1", 0x05: "FIN_WAIT2", 0x06: "TIME_WAIT",
+        0x07: "CLOSE", 0x08: "CLOSE_WAIT", 0x09: "LAST_ACK",
+        0x0A: "LISTEN", 0x0B: "CLOSING",
+    }
+
+    def __init__(self, config: dict, command: str) -> None:
         self._config = config
         self._unavailable: str | None = None
+        self._command = command
         self._process: subprocess.Popen | None = None
         self._stdout_queue: queue.Queue[str] = queue.Queue()
         self._stdout_thread: threading.Thread | None = None
         self._warning_issued = False
+        self._header_seen = False
 
     @property
     def unavailable(self) -> str | None:
         return self._unavailable
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
-        """Run a command inside WSL via wsl.exe."""
+        """Run a command inside WSL via wsl.exe using sh -c."""
         try:
             result = subprocess.run(
-                ["wsl.exe", "-e", "bash", "-c", cmd],
+                ["wsl.exe", "-e", "sh", "-c", cmd],
                 capture_output=True, text=True, timeout=10,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
@@ -267,10 +277,6 @@ class WslTcpHandler:
             return result
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
             return None
-
-    def _wsl_available(self) -> bool:
-        """Check if wsl.exe is reachable."""
-        return self._run_command("echo ok") is not None
 
     def _stdout_reader(self, process: subprocess.Popen) -> None:
         """Daemon thread that reads subprocess stdout into the queue."""
@@ -281,11 +287,10 @@ class WslTcpHandler:
             pass
 
     def _start_subprocess(self) -> subprocess.Popen | None:
-        """Spawn the persistent WSL subprocess running a bash one-liner."""
+        """Spawn the persistent WSL subprocess."""
         try:
-            cmd = f"while true; do cat /proc/net/tcp; sleep {self._config['polling_interval']}; done"
             proc = subprocess.Popen(
-                ["wsl.exe", "-e", "bash", "-c", cmd],
+                ["wsl.exe", "-e", "sh", "-c", self._command],
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                 text=True, bufsize=1,
                 creationflags=subprocess.CREATE_NO_WINDOW,
@@ -301,13 +306,6 @@ class WslTcpHandler:
     def _subprocess_alive(self, process: subprocess.Popen) -> bool:
         """Check if the WSL subprocess is still running."""
         return process is not None and process.poll() is None
-
-    def _ensure_subprocess(self) -> subprocess.Popen | None:
-        """Ensure the WSL subprocess is running."""
-        if self._subprocess_alive(self._process):
-            return self._process
-        self._process = self._start_subprocess()
-        return self._process
 
     def _drain_output(self) -> list[str]:
         """Drain all available lines from the subprocess stdout queue."""
@@ -343,33 +341,42 @@ class WslTcpHandler:
                 "local_port": local_port,
                 "remote_addr": remote_addr,
                 "remote_port": remote_port,
-                "source": ConnectionSource.WSL,
             }
         except (ValueError, IndexError):
             return None
 
     @staticmethod
     def _tcp_state_is_active(state_hex: int) -> bool:
-        """Return True only for ESTABLISHED (0x01)."""
-        return state_hex == 0x01
+        """Return True only for ESTABLISHED."""
+        return state_hex == WslTcpConnectionHandler.ESTABLISHED
 
     def get_connections(self) -> list[dict]:
-        """Get active TCP connections from the WSL subprocess."""
-        if not self._config["wsl_monitoring"]:
-            return []
-
-        # Ensure subprocess is running
+        """Get active TCP connections from the subprocess."""
         if not self._subprocess_alive(self._process):
             self._process = self._start_subprocess()
             if self._process is None:
                 if not self._warning_issued:
-                    print("[wsl] wsl.exe not available, skipping WSL monitoring")
+                    self._unavailable = "wsl.exe not available"
+                    print(f"[{self._unavailable}]")
                     self._warning_issued = True
                 return []
 
         lines = self._drain_output()
         if not lines and not self._subprocess_alive(self._process):
             self._process = self._start_subprocess()
+            return []
+
+        # Validate /proc/net/tcp header on first successful read
+        for line in lines:
+            stripped = line.strip()
+            if stripped and "local_address" in stripped:
+                self._header_seen = True
+                break
+        if lines and not self._header_seen:
+            if not self._warning_issued:
+                self._unavailable = "/proc/net/tcp missing header"
+                print(f"[{self._unavailable}]")
+                self._warning_issued = True
             return []
 
         connections = []
@@ -379,6 +386,33 @@ class WslTcpHandler:
                 continue
             if self._tcp_state_is_active(parsed["state"]):
                 connections.append(parsed)
+        return connections
+
+
+class WslTcpHandler(WslTcpConnectionHandler):
+    """Handles WSL TCP connection retrieval via /proc/net/tcp."""
+
+    def __init__(self, config: dict) -> None:
+        cmd = f"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done"
+        super().__init__(config, cmd)
+        if not self._wsl_available():
+            self._unavailable = "wsl.exe not reachable"
+            print(f"[{self._unavailable}]")
+
+    def _wsl_available(self) -> bool:
+        """Check if wsl.exe is reachable."""
+        return self._run_command("echo ok", check=True) is not None
+
+    def get_connections(self) -> list[dict]:
+        """Get active TCP connections from WSL /proc/net/tcp."""
+        if self._unavailable:
+            return []
+        if not self._config["wsl_monitoring"]:
+            return []
+        conns = super().get_connections()
+        for c in conns:
+            c["source"] = ConnectionSource.WSL
+        return conns
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────
