@@ -29,3 +29,6 @@
 # Containers are auto-discovered via docker ps at startup.
 # New containers started after the daemon begins are NOT picked up.
 # wsl_docker_monitoring_max = 0
+
+# Enable debug-level logging (prints all connections each poll).
+# debug = false
