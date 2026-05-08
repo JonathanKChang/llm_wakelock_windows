@@ -32,7 +32,7 @@ def _monitor():
         "remote_ssh_ports": [22],
         "ssh_min_duration": 30.0,
         "polling_interval": 5.0,
-        "enable_wsl_monitoring": False,
+        "wsl_monitoring": False,
     })
 
 

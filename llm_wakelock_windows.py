@@ -354,7 +354,28 @@ class WslTcpHandler:
                 connections.append(parsed)
 
 
+# ── Configuration ──────────────────────────────────────────────────────────────
+
+def load_config() -> dict:
+    """Load config from config.toml if it exists, otherwise return defaults."""
+    config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml")
+    user_cfg = {}
+    if os.path.isfile(config_path):
+        with open(config_path, "rb") as f:
+            user_cfg = tomllib.load(f)
+    config = {**DEFAULTS, **user_cfg}
+    pprint.pprint(config, sort_dicts=False)
+    return config
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────
+
+def main() -> None:
+    config = load_config()
+    monitor = TcpConnectionMonitor(config)
+    monitor.run()
+
+
 if __name__ == "__main__":
     main()
 
