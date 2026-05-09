@@ -335,37 +335,63 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
 
 
 class WslDockerManager(TcpConnectionSource):
-    """Manages multiple WslDockerTcpHandler instances with auto-discovery."""
+    """Manages multiple WslDockerTcpHandler instances with sync discovery."""
 
     def __init__(self, config: dict) -> None:
         self._config = config
         self.unavailable: bool = False
         self._timeout = config.get("wsl_command_timeout", 10)
-        self._container_handlers: list[WslDockerTcpHandler] = []
-        self._discover_containers()
+        self._discovery_interval = config.get("wsl_docker_discovery_interval", 10)
+        self._handlers: dict[str, WslDockerTcpHandler] = {}
+        self._discovery_cycle = 0
+        self._discover()
 
-    def _discover_containers(self) -> None:
-        """Discover running Docker containers, cap at wsl_docker_monitoring_max."""
+    def _discover(self) -> None:
+        """Run docker ps, diff against _handlers, add/remove containers, enforce max cap."""
         max_containers = self._config.get("wsl_docker_monitoring_max", 0)
         if max_containers < 1:
             return
-        result = _wsl_run_command("docker ps --format '{{.ID}}'", timeout=self._timeout, check=True)
-        if result is None or result.returncode != 0:
+        result = _wsl_run_command("docker ps --format '{{.ID}}\t{{.Names}}'", timeout=self._timeout, check=True)
+        if result is None:
             if not self.unavailable:
                 self.unavailable = True
                 print("[WARN] docker not available in WSL — Docker connections will not be monitored")
             return
-        container_ids = [cid.strip() for cid in result.stdout.strip().split("\n") if cid.strip()]
-        for cid in container_ids[:max_containers]:
-            handler = WslDockerTcpHandler(self._config, cid)
-            if not handler.unavailable:
-                self._container_handlers.append(handler)
+        # Skip header line (contains "CONTAINER ID"), parse remaining lines
+        lines = result.stdout.strip().split("\n")
+        if not lines or "CONTAINER ID" in lines[0]:
+            lines = lines[1:] if lines else []
+        current_ids = {line.split("\t")[0].strip() for line in lines if line.strip()}
+        # Remove stopped containers
+        for cid in list(self._handlers):
+            if cid not in current_ids:
+                self._handlers[cid].cleanup()
+                del self._handlers[cid]
+        # Add new containers
+        for cid in current_ids:
+            if cid not in self._handlers:
+                handler = WslDockerTcpHandler(self._config, cid)
+                if not handler.unavailable:
+                    self._handlers[cid] = handler
+        # Enforce max cap (FIFO: remove oldest by insertion order = dict order)
+        while len(self._handlers) > max_containers:
+            oldest = next(iter(self._handlers))
+            self._handlers[oldest].cleanup()
+            del self._handlers[oldest]
 
     def get_connections(self) -> list[dict]:
-        """Aggregate connections from all container handlers."""
+        """Aggregate connections from all container handlers, with sync discovery."""
         if self.unavailable:
             return []
+        self._discovery_cycle += 1
+        if self._discovery_cycle % self._discovery_interval == 0:
+            self._discover()
         all_conns: list[dict] = []
-        for handler in self._container_handlers:
+        for handler in self._handlers.values():
             all_conns.extend(handler.get_connections())
         return all_conns
+
+    def cleanup(self) -> None:
+        """Clean up all container handler subprocesses."""
+        for handler in self._handlers.values():
+            handler.cleanup()

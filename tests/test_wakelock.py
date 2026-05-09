@@ -214,7 +214,27 @@ def test_docker_container_discovery_respects_max():
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
         config = {"wsl_docker_monitoring_max": 2, "polling_interval": 5.0}
         manager = WslDockerManager(config)
-        assert len(manager._container_handlers) == 2
+        assert len(manager._handlers) == 2
+
+
+def test_docker_discovery_runs_on_interval():
+    """Discovery runs every N get_connections() calls."""
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = "abc123\ndef456\n"
+    with patch("tcp_handlers.subprocess.run", return_value=mock_result), \
+         patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
+        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0, "wsl_docker_discovery_interval": 3}
+        manager = WslDockerManager(config)
+        initial_count = len(manager._handlers)
+        # Calls 1-2: no new discovery
+        manager.get_connections()
+        manager.get_connections()
+        assert manager._discovery_cycle == 2
+        # Call 3: discovery runs
+        manager.get_connections()
+        assert manager._discovery_cycle == 3
+        assert len(manager._handlers) == initial_count  # same containers, no new ones
 
 
 def test_docker_handler_no_containers():
