@@ -12,7 +12,7 @@ import time
 
 import llm_wakelock_windows as mod
 import tcp_handlers
-from tcp_handlers import TcpConnectionMonitor as _M, ConnectionSource as _C, WslTcpHandler, WslDockerManager
+from tcp_handlers import WslTcpConnectionHandler as _M, ConnectionSource as _C, WslTcpHandler, WslDockerManager
 
 
 def _ssh_conn(local_addr, local_port, remote_port, remote_addr):

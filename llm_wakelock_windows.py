@@ -21,7 +21,6 @@ import pprint
 from tcp_handlers import (
     ConnectionSource,
     TcpConnectionSource,
-    TcpConnectionMonitor,
     WindowsTcpHandler,
     WslTcpHandler,
     WslDockerManager,
@@ -56,15 +55,6 @@ DEFAULTS = {
 
 class TcpConnectionMonitor:
     """Orchestrates connection handlers and manages the wakelock main loop."""
-
-    # Expose constants from tcp_handlers for backward compatibility.
-    ESTABLISHED = TcpConnectionMonitor.ESTABLISHED
-    MIB_TCP_STATE_ESTAB = TcpConnectionMonitor.MIB_TCP_STATE_ESTAB
-    ES_CONTINUOUS = TcpConnectionMonitor.ES_CONTINUOUS
-    ES_SYSTEM_REQUIRED = TcpConnectionMonitor.ES_SYSTEM_REQUIRED
-    AF_INET = TcpConnectionMonitor.AF_INET
-    TCP_TABLE_OWNER_PID_ALL = TcpConnectionMonitor.TCP_TABLE_OWNER_PID_ALL
-    ERROR_INSUFFICIENT_BUFFER = TcpConnectionMonitor.ERROR_INSUFFICIENT_BUFFER
 
     def __init__(self, config: dict) -> None:
         self._config = config
@@ -133,18 +123,21 @@ class TcpConnectionMonitor:
         return self.is_monitored_active(all_conns, self._config["local_monitored_ports"], self._config["remote_monitored_ports"]) or \
                self.is_ssh_active(all_conns, self._config["local_ssh_ports"], self._config["remote_ssh_ports"], self._config["ssh_min_duration"])
 
+    _ES_CONTINUOUS = 0x80000000
+    _ES_SYSTEM_REQUIRED = 0x00000001
+
     def _acquire(self) -> None:
         """Acquires system wake lock to prevent sleep."""
         import ctypes
         ctypes.windll.kernel32.SetThreadExecutionState(
-            TcpConnectionMonitor.ES_CONTINUOUS | TcpConnectionMonitor.ES_SYSTEM_REQUIRED
+            self._ES_CONTINUOUS | self._ES_SYSTEM_REQUIRED
         )
 
     def _release(self) -> None:
         """Resets idle timer then releases system wake lock."""
         import ctypes
-        ctypes.windll.kernel32.SetThreadExecutionState(TcpConnectionMonitor.ES_SYSTEM_REQUIRED)
-        ctypes.windll.kernel32.SetThreadExecutionState(TcpConnectionMonitor.ES_CONTINUOUS)
+        ctypes.windll.kernel32.SetThreadExecutionState(self._ES_SYSTEM_REQUIRED)
+        ctypes.windll.kernel32.SetThreadExecutionState(self._ES_CONTINUOUS)
 
     def run(self) -> None:
         """Main loop: monitor connections and manage wakelock."""

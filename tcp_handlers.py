@@ -22,25 +22,16 @@ class TcpConnectionSource(Protocol):
     unavailable: bool
 
 
-# ── Constants ──────────────────────────────────────────────────────────────────
-
-class TcpConnectionMonitor:
-    """Named constants shared across handlers and the main loop."""
-
-    ESTABLISHED = 0x01
-    MIB_TCP_STATE_ESTAB = 5
-    ES_CONTINUOUS = 0x80000000
-    ES_SYSTEM_REQUIRED = 0x00000001
-    AF_INET = 2
-    TCP_TABLE_OWNER_PID_ALL = 5
-    ERROR_INSUFFICIENT_BUFFER = 122
-
-
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
 
 class WindowsTcpHandler:
     """Handles Windows TCP connection retrieval via iphlpapi."""
+
+    AF_INET = 2
+    TCP_TABLE_OWNER_PID_ALL = 5
+    MIB_TCP_STATE_ESTAB = 5
+    ERROR_INSUFFICIENT_BUFFER = 122
 
     def __init__(self, config: dict) -> None:
         self._config = config
@@ -51,14 +42,14 @@ class WindowsTcpHandler:
         iphlpapi = ctypes.windll.iphlpapi
         size = ctypes.c_ulong(0)
         ret = iphlpapi.GetExtendedTcpTable(
-            None, ctypes.byref(size), True, TcpConnectionMonitor.AF_INET, TcpConnectionMonitor.TCP_TABLE_OWNER_PID_ALL, 0
+            None, ctypes.byref(size), True, WindowsTcpHandler.AF_INET, WindowsTcpHandler.TCP_TABLE_OWNER_PID_ALL, 0
         )
-        if ret != TcpConnectionMonitor.ERROR_INSUFFICIENT_BUFFER:
+        if ret != WindowsTcpHandler.ERROR_INSUFFICIENT_BUFFER:
             raise OSError(f"Unexpected error querying TCP table size: {ret}")
 
         buf = ctypes.create_string_buffer(size.value)
         ret = iphlpapi.GetExtendedTcpTable(
-            buf, ctypes.byref(size), True, TcpConnectionMonitor.AF_INET, TcpConnectionMonitor.TCP_TABLE_OWNER_PID_ALL, 0
+            buf, ctypes.byref(size), True, WindowsTcpHandler.AF_INET, WindowsTcpHandler.TCP_TABLE_OWNER_PID_ALL, 0
         )
         if ret != 0:
             raise OSError(f"GetExtendedTcpTable failed: {ret}")
@@ -80,7 +71,7 @@ class WindowsTcpHandler:
         connections = []
         for i in range(num_entries):
             row = row_ptr[i]
-            if row.dwState != TcpConnectionMonitor.MIB_TCP_STATE_ESTAB:
+            if row.dwState != WindowsTcpHandler.MIB_TCP_STATE_ESTAB:
                 continue
             connections.append({
                 "state": row.dwState,
