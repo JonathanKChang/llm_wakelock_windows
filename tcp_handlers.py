@@ -238,13 +238,6 @@ class WslTcpHandler(WslTcpConnectionHandler):
     def __init__(self, config: dict) -> None:
         cmd = f"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done"
         super().__init__(config, cmd)
-        if not self._wsl_available():
-            self.unavailable = True
-            print("[WARN] wsl.exe not reachable — WSL connections will not be monitored")
-
-    def _wsl_available(self) -> bool:
-        """Check if wsl.exe is reachable."""
-        return self._run_command("echo ok", check=True) is not None
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from WSL /proc/net/tcp."""
