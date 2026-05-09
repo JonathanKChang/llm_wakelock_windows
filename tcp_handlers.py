@@ -288,6 +288,7 @@ class WslTcpHandler(WslTcpConnectionHandler):
     def __init__(self, config: dict) -> None:
         cmd = f"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done"
         super().__init__(config, cmd)
+        print("[INFO] WSL monitoring started")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from WSL /proc/net/tcp."""
@@ -313,6 +314,8 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         if self._run_command(f"docker exec {short_id} echo ok", check=True) is None:
             self.unavailable = True
             print(f"[WARN] docker container {short_id} not accessible — this container will not be monitored")
+        else:
+            print(f"[INFO] WSL-Docker {short_id} monitoring started")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from Docker container."""
