@@ -51,6 +51,8 @@ Copy `config.toml` from the script directory and uncomment the values you want t
 | `polling_interval` | `5.0` | Polling interval (seconds) |
 | `wsl_monitoring` | `false` | Monitor WSL2 TCP connections |
 | `wsl_docker_monitoring_max` | `0` | Max Docker containers to monitor (0 = disabled) |
+| `wsl_command_timeout` | `10` | Timeout for all WSL commands (seconds) |
+| `wsl_docker_discovery_interval` | `10` | Poll cycles between Docker container discovery scans |
 
 Example `config.toml`:
 
@@ -87,7 +89,7 @@ Monitor Docker containers running inside WSL by setting `wsl_docker_monitoring_m
 wsl_docker_monitoring_max = 5  # monitor up to 5 containers
 ```
 
-> **Note:** Container discovery runs once at startup. New containers started after the daemon begins are **not** picked up — restart the daemon to pick up new containers.
+> **Note:** Container discovery runs every `wsl_docker_discovery_interval` poll cycles (default: every ~50s at 5s polling). New containers are picked up automatically.
 
 > **Note:** Connections are labeled `[docker:<container_id>]` in the output.
 

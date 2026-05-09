@@ -15,6 +15,21 @@ class ConnectionSource(Enum):
     WSL_DOCKER = 2
 
 
+def _wsl_run_command(cmd: str, timeout: int = 10, check: bool = False) -> subprocess.CompletedProcess | None:
+    """Run a command inside WSL via wsl.exe using sh -c."""
+    try:
+        result = subprocess.run(
+            ["wsl.exe", "-e", "sh", "-c", cmd],
+            capture_output=True, text=True, timeout=timeout,
+            creationflags=subprocess.CREATE_NO_WINDOW,
+        )
+        if check and result.returncode != 0:
+            return None
+        return result
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return None
+
+
 class TcpConnectionSource(Protocol):
     """Protocol for TCP connection sources (Windows and WSL)."""
 
@@ -111,6 +126,7 @@ class WslTcpConnectionHandler:
         self._header_seen = False
         self._debug = config.get("debug", False)
         self._terminated = False
+        self._timeout = config.get("wsl_command_timeout", 10)
 
     def _kill_process_tree(self, process: subprocess.Popen) -> None:
         """Kill the WSL subprocess and its entire child process tree in WSL."""
@@ -125,7 +141,7 @@ class WslTcpConnectionHandler:
             subprocess.run(
                 ["wsl.exe", "-e", "sh", "-c",
                  f"pkill -P {pid} 2>/dev/null; kill {pid} 2>/dev/null"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, timeout=self._timeout,
                 creationflags=subprocess.CREATE_NO_WINDOW,
             )
         except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
@@ -134,11 +150,11 @@ class WslTcpConnectionHandler:
             # Final fallback: try to terminate via Python
             try:
                 process.terminate()
-                process.wait(timeout=3)
+                process.wait(timeout=self._timeout)
             except (subprocess.TimeoutExpired, OSError, ValueError):
                 try:
                     process.kill()
-                    process.wait(timeout=3)
+                    process.wait(timeout=self._timeout)
                 except (subprocess.TimeoutExpired, OSError, ValueError):
                     pass
 
@@ -154,17 +170,7 @@ class WslTcpConnectionHandler:
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
         """Run a command inside WSL via wsl.exe using sh -c."""
-        try:
-            result = subprocess.run(
-                ["wsl.exe", "-e", "sh", "-c", cmd],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if check and result.returncode != 0:
-                return None
-            return result
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return None
+        return _wsl_run_command(cmd, timeout=self._timeout, check=check)
 
     def _stdout_reader(self, process: subprocess.Popen) -> None:
         """Daemon thread that reads subprocess stdout into the queue."""
@@ -334,29 +340,16 @@ class WslDockerManager(TcpConnectionSource):
     def __init__(self, config: dict) -> None:
         self._config = config
         self.unavailable: bool = False
+        self._timeout = config.get("wsl_command_timeout", 10)
         self._container_handlers: list[WslDockerTcpHandler] = []
         self._discover_containers()
-
-    def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
-        """Run a command inside WSL via wsl.exe using sh -c."""
-        try:
-            result = subprocess.run(
-                ["wsl.exe", "-e", "sh", "-c", cmd],
-                capture_output=True, text=True, timeout=10,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            if check and result.returncode != 0:
-                return None
-            return result
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return None
 
     def _discover_containers(self) -> None:
         """Discover running Docker containers, cap at wsl_docker_monitoring_max."""
         max_containers = self._config.get("wsl_docker_monitoring_max", 0)
         if max_containers < 1:
             return
-        result = self._run_command("docker ps --format '{{.ID}}'", check=True)
+        result = _wsl_run_command("docker ps --format '{{.ID}}'", timeout=self._timeout, check=True)
         if result is None or result.returncode != 0:
             if not self.unavailable:
                 self.unavailable = True

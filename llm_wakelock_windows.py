@@ -37,6 +37,8 @@ DEFAULTS = {
     "polling_interval": 5.0,
     "wsl_monitoring": False,
     "wsl_docker_monitoring_max": 0,
+    "wsl_command_timeout": 10,
+    "wsl_docker_discovery_interval": 10,
     "debug": False,
 }
 
