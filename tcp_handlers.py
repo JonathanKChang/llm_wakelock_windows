@@ -19,6 +19,7 @@ class TcpConnectionSource(Protocol):
     """Protocol for TCP connection sources (Windows and WSL)."""
 
     def get_connections(self) -> list[dict]: ...
+    def cleanup(self) -> None: ...
     unavailable: bool
 
 
@@ -37,6 +38,10 @@ class WindowsTcpHandler:
         self._config = config
         self.unavailable: bool = False
         self._debug = config.get("debug", False)
+
+    def cleanup(self) -> None:
+        """No-op — Windows handler uses iphlpapi, no subprocesses to clean up."""
+        pass
 
     def get_connections(self) -> list[dict]:
         """Retrieve all established TCP connections from Windows iphlpapi."""
@@ -105,6 +110,47 @@ class WslTcpConnectionHandler:
         self._stdout_thread: threading.Thread | None = None
         self._header_seen = False
         self._debug = config.get("debug", False)
+        self._terminated = False
+
+    def _kill_process_tree(self, process: subprocess.Popen) -> None:
+        """Kill the WSL subprocess and its entire child process tree in WSL."""
+        if process is None:
+            return
+        if process.poll() is not None:
+            return
+        try:
+            # Kill the parent sh process and its entire subtree in WSL.
+            # This ensures the "while true; do ...; done" loop and all children are terminated.
+            pid = process.pid
+            subprocess.run(
+                ["wsl.exe", "-e", "sh", "-c",
+                 f"pkill -P {pid} 2>/dev/null; kill {pid} 2>/dev/null"],
+                capture_output=True, text=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            pass
+        finally:
+            # Final fallback: try to terminate via Python
+            try:
+                process.terminate()
+                process.wait(timeout=3)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                try:
+                    process.kill()
+                    process.wait(timeout=3)
+                except (subprocess.TimeoutExpired, OSError, ValueError):
+                    pass
+
+    def cleanup(self) -> None:
+        """Terminate the WSL subprocess and its child process tree."""
+        if self._terminated:
+            return
+        self._terminated = True
+        self._kill_process_tree(self._process)
+        # Wait for the stdout reader thread to finish
+        if self._stdout_thread and self._stdout_thread.is_alive():
+            self._stdout_thread.join(timeout=3)
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
         """Run a command inside WSL via wsl.exe using sh -c."""
@@ -198,6 +244,8 @@ class WslTcpConnectionHandler:
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from the subprocess."""
+        if self._terminated:
+            return []
         if not self._subprocess_alive(self._process):
             self._process = self._start_subprocess()
             if self._process is None:

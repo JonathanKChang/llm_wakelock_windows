@@ -17,6 +17,7 @@ import time
 import datetime
 import tomllib
 import os
+import signal
 import pprint
 from tcp_handlers import (
     ConnectionSource,
@@ -111,6 +112,11 @@ class TcpConnectionMonitor:
             strs.append(f"  {prefix}{conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
         return strs
 
+    def _cleanup_handlers(self) -> None:
+        """Clean up all handlers (each handler is responsible for its own resources)."""
+        for handler in self._handlers:
+            handler.cleanup()
+
     def get_all_connections(self) -> list[dict]:
         """Collect connections from all handlers into a single list."""
         all_conns: list[dict] = []
@@ -144,6 +150,15 @@ class TcpConnectionMonitor:
         if sys.platform != "win32":
             print("Error: this script requires Windows", file=sys.stderr)
             sys.exit(1)
+
+        # Register signal handlers for clean shutdown (closure captures self)
+        def _signal_handler(signum, frame) -> None:
+            print("\nShutdown signal received, cleaning up...")
+            self._cleanup_handlers()
+            sys.exit(0)
+
+        signal.signal(signal.SIGINT, _signal_handler)
+        signal.signal(signal.SIGTERM, _signal_handler)
 
         wakelock = False
         while True:
