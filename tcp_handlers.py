@@ -15,21 +15,6 @@ class ConnectionSource(Enum):
     WSL_DOCKER = 2
 
 
-def _wsl_run_command(cmd: str, timeout: int = 10, check: bool = False) -> subprocess.CompletedProcess | None:
-    """Run a command inside WSL via wsl.exe using sh -c."""
-    try:
-        result = subprocess.run(
-            ["wsl.exe", "-e", "sh", "-c", cmd],
-            capture_output=True, text=True, timeout=timeout,
-            creationflags=subprocess.CREATE_NO_WINDOW,
-        )
-        if check and result.returncode != 0:
-            return None
-        return result
-    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-        return None
-
-
 class SubprocessDrain:
     """Persistent subprocess that runs a command in a loop, draining stdout into a queue.
 
@@ -254,10 +239,6 @@ class WslTcpConnectionHandler:
         self._kill_process_tree(self._drain._process)
         self._drain.stop()
 
-    def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
-        """Run a command inside WSL via wsl.exe using sh -c."""
-        return _wsl_run_command(cmd, timeout=self._timeout, check=check)
-
     def _drain_output(self) -> list[str]:
         """Drain all available lines from the subprocess queue."""
         lines = self._drain.drain()
@@ -368,8 +349,8 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         cmd = f"docker exec {short_id} sh -c \"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done\""
         super().__init__(config, cmd)
         self._container_id = short_id
-        # Check docker accessibility
-        if self._run_command(f"docker exec {short_id} echo ok", check=True) is None:
+        # Check docker accessibility by trying to start the subprocess
+        if self._drain.start() is None:
             self.unavailable = True
             print(f"[WARN] docker container {short_id} not accessible — this container will not be monitored")
         else:
