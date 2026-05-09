@@ -153,10 +153,10 @@ class TcpConnectionMonitor:
 
             if active and not wakelock:
                 self._acquire()
+                wakelock = True
+                if not all_conns:
+                    print("[WARN] active=True but no connections returned — this should not happen")
                 if self._debug:
-                    if not all_conns:
-                        print("[WARN] active=True but no connections returned — this should not happen")
-                    else:
                         print(f"[{now}] Grabbing wakelock due to active connections (debug: all connections):\n" + "\n".join(self.format_connections(all_conns)))
                 else:
                     relevant_conns = [
@@ -166,16 +166,12 @@ class TcpConnectionMonitor:
                             or conn["local_port"] in self._config["local_ssh_ports"]
                             or conn["remote_port"] in self._config["remote_ssh_ports"])
                     ]
-                    if not relevant_conns:
-                        print("[WARN] active=True but no relevant connections found — has_active_connections may be incorrect")
-                    else:
-                        print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
-                wakelock = True
+                    print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
 
             elif not active and wakelock:
                 self._release()
-                print(f"[{now}] Releasing wakelock")
                 wakelock = False
+                print(f"[{now}] Releasing wakelock")
 
             time.sleep(self._config["polling_interval"])
 
