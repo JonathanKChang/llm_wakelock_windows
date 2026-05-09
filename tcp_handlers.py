@@ -30,6 +30,93 @@ def _wsl_run_command(cmd: str, timeout: int = 10, check: bool = False) -> subpro
         return None
 
 
+class SubprocessDrain:
+    """Persistent subprocess that runs a command in a loop, draining stdout into a queue.
+
+    Constructs the loop: `while true; do echo <sentinel>; <command>; sleep <interval>; done`
+    drain() returns only lines after the most recent sentinel, discarding stale data
+    before any sentinel (e.g. from a subprocess restart).
+    """
+
+    def __init__(self, command: str, interval: float = 5.0, sentinel: str | None = None, max_queue_lines: int = 1000) -> None:
+        self._process: subprocess.Popen | None = None
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=max_queue_lines)
+        self._thread: threading.Thread | None = None
+        self._sentinel = sentinel
+        # Build the full shell command: loop + sentinel + command + sleep
+        if sentinel:
+            self._full_command = f"while true; do echo {sentinel}; {command}; sleep {interval}; done"
+        else:
+            self._full_command = f"while true; do {command}; sleep {interval}; done"
+
+    def start(self) -> subprocess.Popen | None:
+        """Spawn the persistent subprocess and start the drain thread."""
+        try:
+            proc = subprocess.Popen(
+                ["wsl.exe", "-e", "sh", "-c", self._full_command],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, bufsize=1,
+                creationflags=subprocess.CREATE_NO_WINDOW,
+            )
+            self._process = proc
+            self._thread = threading.Thread(
+                target=self._drain_loop, args=(proc, self._queue), daemon=True
+            )
+            self._thread.start()
+            return proc
+        except (FileNotFoundError, OSError):
+            return None
+
+    @staticmethod
+    def _drain_loop(process: subprocess.Popen, queue: queue.Queue[str]) -> None:
+        """Daemon thread: read stdout lines into queue."""
+        try:
+            for line in process.stdout:
+                queue.put(line)
+        except Exception:
+            pass
+
+    def drain(self) -> list[str]:
+        """Drain lines since the most recent sentinel (or all lines if no sentinel)."""
+        lines: list[str] = []
+        while not self._queue.empty():
+            try:
+                lines.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        if self._sentinel is None:
+            return lines
+        # Find last sentinel; return only lines after it
+        last_idx = None
+        for i, line in enumerate(lines):
+            if self._sentinel in line:
+                last_idx = i
+        if last_idx is not None:
+            return lines[last_idx + 1:]
+        # No sentinel seen — stale data from before discovery started
+        return []
+
+    @property
+    def alive(self) -> bool:
+        """True if the subprocess is still running."""
+        return self._process is not None and self._process.poll() is None
+
+    def stop(self) -> None:
+        """Terminate the subprocess and wait for the drain thread."""
+        if self._process is not None:
+            try:
+                self._process.terminate()
+                self._process.wait(timeout=3)
+            except (subprocess.TimeoutExpired, OSError, ValueError):
+                try:
+                    self._process.kill()
+                    self._process.wait(timeout=3)
+                except (subprocess.TimeoutExpired, OSError, ValueError):
+                    pass
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=3)
+
+
 class TcpConnectionSource(Protocol):
     """Protocol for TCP connection sources (Windows and WSL)."""
 
@@ -119,10 +206,11 @@ class WslTcpConnectionHandler:
     def __init__(self, config: dict, command: str) -> None:
         self._config = config
         self.unavailable: bool = False
-        self._command = command
-        self._process: subprocess.Popen | None = None
-        self._stdout_queue: queue.Queue[str] = queue.Queue()
-        self._stdout_thread: threading.Thread | None = None
+        self._drain = SubprocessDrain(
+            command,
+            interval=config["polling_interval"],
+            sentinel="/proc/net/tcp",
+        )
         self._header_seen = False
         self._debug = config.get("debug", False)
         self._terminated = False
@@ -163,54 +251,18 @@ class WslTcpConnectionHandler:
         if self._terminated:
             return
         self._terminated = True
-        self._kill_process_tree(self._process)
-        # Wait for the stdout reader thread to finish
-        if self._stdout_thread and self._stdout_thread.is_alive():
-            self._stdout_thread.join(timeout=3)
+        self._kill_process_tree(self._drain._process)
+        self._drain.stop()
 
     def _run_command(self, cmd: str, check: bool = False) -> subprocess.CompletedProcess | None:
         """Run a command inside WSL via wsl.exe using sh -c."""
         return _wsl_run_command(cmd, timeout=self._timeout, check=check)
 
-    def _stdout_reader(self, process: subprocess.Popen) -> None:
-        """Daemon thread that reads subprocess stdout into the queue."""
-        try:
-            for line in process.stdout:
-                self._stdout_queue.put(line)
-        except Exception:
-            pass
-
-    def _start_subprocess(self) -> subprocess.Popen | None:
-        """Spawn the persistent WSL subprocess."""
-        try:
-            proc = subprocess.Popen(
-                ["wsl.exe", "-e", "sh", "-c", self._command],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                text=True, bufsize=1,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-            self._stdout_thread = threading.Thread(
-                target=self._stdout_reader, args=(proc,), daemon=True
-            )
-            self._stdout_thread.start()
-            return proc
-        except (FileNotFoundError, OSError):
-            return None
-
-    def _subprocess_alive(self, process: subprocess.Popen) -> bool:
-        """Check if the WSL subprocess is still running."""
-        return process is not None and process.poll() is None
-
     def _drain_output(self) -> list[str]:
-        """Drain all available lines from the subprocess stdout queue."""
-        lines = []
-        while not self._stdout_queue.empty():
-            try:
-                lines.append(self._stdout_queue.get_nowait())
-            except queue.Empty:
-                break
+        """Drain all available lines from the subprocess queue."""
+        lines = self._drain.drain()
         if self._debug and lines:
-            print(f"  [DEBUG] {len(lines)} lines from {self._command[:60]} ...")
+            print(f"  [DEBUG] {len(lines)} lines from {self._drain._full_command[:60]} ...")
             for line in lines:
                 print(f"    {line.rstrip()}")
         return lines
@@ -252,8 +304,8 @@ class WslTcpConnectionHandler:
         """Get active TCP connections from the subprocess."""
         if self._terminated:
             return []
-        if not self._subprocess_alive(self._process):
-            self._process = self._start_subprocess()
+        if not self._drain.alive:
+            self._process = self._drain.start()
             if self._process is None:
                 if not self.unavailable:
                     self.unavailable = True
@@ -261,8 +313,8 @@ class WslTcpConnectionHandler:
                 return []
 
         lines = self._drain_output()
-        if not lines and not self._subprocess_alive(self._process):
-            self._process = self._start_subprocess()
+        if not lines and not self._drain.alive:
+            self._process = self._drain.start()
             return []
 
         # Validate /proc/net/tcp header on first successful read
@@ -335,7 +387,7 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
 
 
 class WslDockerManager(TcpConnectionSource):
-    """Manages multiple WslDockerTcpHandler instances with sync discovery."""
+    """Manages multiple WslDockerTcpHandler instances with persistent discovery process."""
 
     def __init__(self, config: dict) -> None:
         self._config = config
@@ -343,24 +395,23 @@ class WslDockerManager(TcpConnectionSource):
         self._timeout = config.get("wsl_command_timeout", 10)
         self._discovery_interval = config.get("wsl_docker_discovery_interval", 10)
         self._handlers: dict[str, WslDockerTcpHandler] = {}
-        self._discovery_cycle = 0
+        self._discover_drain = SubprocessDrain(
+            f"docker ps --format '{{{{.ID}}}}\\t{{{{.Names}}}}'",
+            interval=self._discovery_interval,
+            sentinel="DISCOVERY",
+            max_queue_lines=1000,
+        )
+        self._discover_drain.start()
         self._discover()
 
     def _discover(self) -> None:
-        """Run docker ps, diff against _handlers, add/remove containers, enforce max cap."""
+        """Parse accumulated docker ps output, diff against _handlers, add/remove containers, enforce max cap."""
         max_containers = self._config.get("wsl_docker_monitoring_max", 0)
         if max_containers < 1:
             return
-        result = _wsl_run_command("docker ps --format '{{.ID}}\t{{.Names}}'", timeout=self._timeout, check=True)
-        if result is None:
-            if not self.unavailable:
-                self.unavailable = True
-                print("[WARN] docker not available in WSL — Docker connections will not be monitored")
+        lines = self._discover_drain.drain()
+        if not lines:
             return
-        # Skip header line (contains "CONTAINER ID"), parse remaining lines
-        lines = result.stdout.strip().split("\n")
-        if not lines or "CONTAINER ID" in lines[0]:
-            lines = lines[1:] if lines else []
         current_ids = {line.split("\t")[0].strip() for line in lines if line.strip()}
         # Remove stopped containers
         for cid in list(self._handlers):
@@ -380,18 +431,16 @@ class WslDockerManager(TcpConnectionSource):
             del self._handlers[oldest]
 
     def get_connections(self) -> list[dict]:
-        """Aggregate connections from all container handlers, with sync discovery."""
+        """Aggregate connections from all container handlers."""
         if self.unavailable:
             return []
-        self._discovery_cycle += 1
-        if self._discovery_cycle % self._discovery_interval == 0:
-            self._discover()
         all_conns: list[dict] = []
         for handler in self._handlers.values():
             all_conns.extend(handler.get_connections())
         return all_conns
 
     def cleanup(self) -> None:
-        """Clean up all container handler subprocesses."""
+        """Clean up all container handler subprocesses and the discovery process."""
         for handler in self._handlers.values():
             handler.cleanup()
+        self._discover_drain.stop()

@@ -207,34 +207,38 @@ def test_format_connections_docker_label():
 
 def test_docker_container_discovery_respects_max():
     """Docker discovery caps handlers at wsl_docker_monitoring_max."""
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    mock_result.stdout = "abc123\ndef456\nghi789\n"
-    with patch("tcp_handlers.subprocess.run", return_value=mock_result), \
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter(["DISCOVERY", "abc123\tcontainer1", "def456\tcontainer2", "ghi789\tcontainer3", ""])
+    mock_proc.poll = MagicMock(return_value=None)
+    mock_run = MagicMock()
+    mock_run.returncode = 0
+    mock_run.stdout = "ok"
+    with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
+         patch("tcp_handlers.subprocess.run", return_value=mock_run), \
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
         config = {"wsl_docker_monitoring_max": 2, "polling_interval": 5.0}
         manager = WslDockerManager(config)
         assert len(manager._handlers) == 2
 
 
-def test_docker_discovery_runs_on_interval():
-    """Discovery runs every N get_connections() calls."""
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    mock_result.stdout = "abc123\ndef456\n"
-    with patch("tcp_handlers.subprocess.run", return_value=mock_result), \
+def test_docker_discovery_runs_on_time_interval():
+    """Discovery runs based on wall-clock time, not get_connections() calls."""
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter(["DISCOVERY", "abc123\tcontainer1", "def456\tcontainer2", ""])
+    mock_proc.poll = MagicMock(return_value=None)
+    mock_run = MagicMock()
+    mock_run.returncode = 0
+    mock_run.stdout = "ok"
+    with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
+         patch("tcp_handlers.subprocess.run", return_value=mock_run), \
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
-        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0, "wsl_docker_discovery_interval": 3}
+        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0, "wsl_docker_discovery_interval": 10}
         manager = WslDockerManager(config)
         initial_count = len(manager._handlers)
-        # Calls 1-2: no new discovery
-        manager.get_connections()
-        manager.get_connections()
-        assert manager._discovery_cycle == 2
-        # Call 3: discovery runs
-        manager.get_connections()
-        assert manager._discovery_cycle == 3
-        assert len(manager._handlers) == initial_count  # same containers, no new ones
+        # get_connections() calls don't trigger discovery anymore
+        for _ in range(5):
+            manager.get_connections()
+        assert len(manager._handlers) == initial_count  # no new discovery via get_connections
 
 
 def test_docker_handler_no_containers():
