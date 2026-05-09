@@ -36,6 +36,7 @@ class WindowsTcpHandler:
     def __init__(self, config: dict) -> None:
         self._config = config
         self.unavailable: bool = False
+        self._debug = config.get("debug", False)
 
     def get_connections(self) -> list[dict]:
         """Retrieve all established TCP connections from Windows iphlpapi."""
@@ -71,7 +72,7 @@ class WindowsTcpHandler:
         connections = []
         for i in range(num_entries):
             row = row_ptr[i]
-            if row.dwState != WindowsTcpHandler.MIB_TCP_STATE_ESTAB:
+            if not self._debug and row.dwState != WindowsTcpHandler.MIB_TCP_STATE_ESTAB:
                 continue
             connections.append({
                 "state": row.dwState,
@@ -227,8 +228,9 @@ class WslTcpConnectionHandler:
             parsed = self._parse_proc_net_tcp_line(line)
             if parsed is None:
                 continue
-            if self._tcp_state_is_active(parsed["state"]):
-                connections.append(parsed)
+            if not self._debug and not self._tcp_state_is_active(parsed["state"]):
+                continue
+            connections.append(parsed)
         return connections
 
 
