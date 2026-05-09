@@ -2,6 +2,13 @@
 
 A generic Windows tool that keeps your system awake while TCP connections on configured ports are active.
 
+## Versions
+
+| Version | Description |
+|---|---|
+| **v1** | Windows-only TCP port monitoring |
+| **v2** | Added basic WSL and WSL Docker monitoring (container discovery runs once at startup) |
+
 ## Why Windows?
 
 I can't be the only one who's repurposed a gaming Windows PC to serve LLMs, since they sit idle when not gaming. But when you're not in a late night vibe-coding session, you might want to save some energy. Manually waking and sleeping machines is a chore, while on the other end Windows / WSL doesn't grab a wakelock for active incoming ssh connections or even high computation LLM inference.
