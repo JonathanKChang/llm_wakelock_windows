@@ -157,7 +157,7 @@ class WslTcpConnectionHandler:
             except queue.Empty:
                 break
         if self._debug and lines:
-            print(f"  [raw] {len(lines)} lines from {self._command[:60]}")
+            print(f"  [DEBUG] {len(lines)} lines from {self._command[:60]} ...")
             for line in lines:
                 print(f"    {line.rstrip()}")
         return lines
