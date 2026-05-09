@@ -66,7 +66,8 @@ class TcpConnectionMonitor:
             self._handlers.append(WslDockerManager(config))
         self._ssh_start_times: dict = {}
 
-    def is_monitored_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
+    @staticmethod
+    def is_monitored_active(connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
         """Check if any connection matches monitored ports (works with any source)."""
         for conn in connections:
             if conn["local_port"] in local_ports:
@@ -110,18 +111,17 @@ class TcpConnectionMonitor:
             strs.append(f"  {prefix}{conn['local_addr']}:{conn['local_port']} -> {conn['remote_addr']}:{conn['remote_port']}")
         return strs
 
-    def _get_all_connections(self) -> list[dict]:
+    def get_all_connections(self) -> list[dict]:
         """Collect connections from all handlers into a single list."""
         all_conns: list[dict] = []
         for handler in self._handlers:
             all_conns.extend(handler.get_connections())
         return all_conns
 
-    def has_active_connections(self) -> bool:
-        """Check for active monitored-port or SSH connections from all sources."""
-        all_conns = self._get_all_connections()
-        return self.is_monitored_active(all_conns, self._config["local_monitored_ports"], self._config["remote_monitored_ports"]) or \
-               self.is_ssh_active(all_conns, self._config["local_ssh_ports"], self._config["remote_ssh_ports"], self._config["ssh_min_duration"])
+    def has_active_connections(self, connections: list[dict], config: dict) -> bool:
+        """Check if the given connections list has any active monitored-port or SSH connections."""
+        return self.is_monitored_active(connections, config["local_monitored_ports"], config["remote_monitored_ports"]) or \
+               self.is_ssh_active(connections, config["local_ssh_ports"], config["remote_ssh_ports"], config["ssh_min_duration"])
 
     _ES_CONTINUOUS = 0x80000000
     _ES_SYSTEM_REQUIRED = 0x00000001
@@ -147,22 +147,29 @@ class TcpConnectionMonitor:
 
         wakelock = False
         while True:
-            active = self.has_active_connections()
+            all_conns = self.get_all_connections()
+            active = self.has_active_connections(all_conns, self._config)
             now = datetime.datetime.now().isoformat()
 
             if active and not wakelock:
                 self._acquire()
                 if self._debug:
-                    print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(self._get_all_connections())))
+                    if not all_conns:
+                        print("[WARN] active=True but no connections returned — this should not happen")
+                    else:
+                        print(f"[{now}] Grabbing wakelock due to active connections (debug: all connections):\n" + "\n".join(self.format_connections(all_conns)))
                 else:
                     relevant_conns = [
-                        conn for conn in self._get_all_connections()
+                        conn for conn in all_conns
                         if (conn["local_port"] in self._config["local_monitored_ports"]
                             or conn["remote_port"] in self._config["remote_monitored_ports"]
                             or conn["local_port"] in self._config["local_ssh_ports"]
                             or conn["remote_port"] in self._config["remote_ssh_ports"])
                     ]
-                    print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
+                    if not relevant_conns:
+                        print("[WARN] active=True but no relevant connections found — has_active_connections may be incorrect")
+                    else:
+                        print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
                 wakelock = True
 
             elif not active and wakelock:
