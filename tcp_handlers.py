@@ -202,57 +202,16 @@ class WslTcpConnectionHandler:
             interval=config["polling_interval"],
             sentinel="/proc/net/tcp",
         )
-        self._header_seen = False
         self._debug = config.get("debug", False)
         self._terminated = False
         self._timeout = config.get("wsl_command_timeout", 10)
-
-    def _kill_process_tree(self, process: subprocess.Popen) -> None:
-        """Kill the WSL subprocess and its entire child process tree in WSL."""
-        if process is None:
-            return
-        if process.poll() is not None:
-            return
-        try:
-            # Kill the parent sh process and its entire subtree in WSL.
-            # This ensures the "while true; do ...; done" loop and all children are terminated.
-            pid = process.pid
-            subprocess.run(
-                ["wsl.exe", "-e", "sh", "-c",
-                 f"pkill -P {pid} 2>/dev/null; kill {pid} 2>/dev/null"],
-                capture_output=True, text=True, timeout=self._timeout,
-                creationflags=subprocess.CREATE_NO_WINDOW,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            pass
-        finally:
-            # Final fallback: try to terminate via Python
-            try:
-                process.terminate()
-                process.wait(timeout=self._timeout)
-            except (subprocess.TimeoutExpired, OSError, ValueError):
-                try:
-                    process.kill()
-                    process.wait(timeout=self._timeout)
-                except (subprocess.TimeoutExpired, OSError, ValueError):
-                    pass
 
     def cleanup(self) -> None:
         """Terminate the WSL subprocess and its child process tree."""
         if self._terminated:
             return
         self._terminated = True
-        self._kill_process_tree(self._drain._process)
         self._drain.stop()
-
-    def _drain_output(self) -> list[str]:
-        """Drain all available lines from the subprocess queue."""
-        lines = self._drain.drain()
-        if self._debug and lines:
-            print(f"  [DEBUG] {len(lines)} lines from {self._drain._full_command[:60]} ...")
-            for line in lines:
-                print(f"    {line.rstrip()}")
-        return lines
 
     @staticmethod
     def _parse_proc_net_tcp_line(line: str) -> dict | None:
@@ -292,29 +251,23 @@ class WslTcpConnectionHandler:
         if self._terminated:
             return []
         if not self._drain.alive:
-            self._process = self._drain.start()
-            if self._process is None:
+            self._drain.start()
+            if not self._drain.alive:
                 if not self.unavailable:
                     self.unavailable = True
                     print("[WARN] wsl.exe not available — WSL connections will not be monitored")
                 return []
 
-        lines = self._drain_output()
-        if not lines and not self._drain.alive:
-            self._process = self._drain.start()
+        lines = self._drain.drain(timeout=self._timeout)
+        if not lines:
+            if not self._drain.alive:
+                self._drain.start()
             return []
 
-        # Validate /proc/net/tcp header on first successful read
-        for line in lines:
-            stripped = line.strip()
-            if stripped and "local_address" in stripped:
-                self._header_seen = True
-                break
-        if lines and not self._header_seen:
-            if not self.unavailable:
-                self.unavailable = True
-                print("[WARN] /proc/net/tcp missing header — connections will not be monitored")
-            return []
+        if self._debug and lines:
+            print(f"  [DEBUG] {len(lines)} lines from {self._drain._full_command[:60]} ...")
+            for line in lines:
+                print(f"    {line.rstrip()}")
 
         connections = []
         for line in lines:
