@@ -11,7 +11,9 @@ A generic Windows tool that keeps your system awake while TCP connections on con
 
 ## Why Windows?
 
-I can't be the only one who's repurposed a gaming Windows PC to serve LLMs, since they sit idle when not gaming. But when you're not in a late night vibe-coding session, you might want to save some energy. Manually waking and sleeping machines is a chore, while on the other end Windows / WSL doesn't grab a wakelock for active incoming ssh connections or even high computation LLM inference.
+I can't be the only one who's repurposed a gaming Windows PC to serve LLMs, since they sit idle when not gaming. But when you're not in a late night vibe-coding session, you might want to save some energy. Manually waking and sleeping machines is a chore, while on the other end Windows / WSL doesn't grab a wakelock for active incoming ssh connections or even high computation LLM inference. 
+
+This was developed in a way that should make it easy to adapt to Linux if desired
 
 ## What it does
 

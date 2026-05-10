@@ -9,10 +9,17 @@ graph TB
         Monitor["<b>TcpConnectionMonitor</b><br/>Core orchestrator<br/>• Port matching<br/>• SSH duration tracking<br/>• Wakelock state machine"]:::core
 
         subgraph Handlers["Connection Handlers (TcpConnectionSource)"]
-            direction LR
+            direction TB
             WinHandler["<b>WindowsTcpHandler</b><br/>iphlpapi.GetExtendedTcpTable"]:::handler
-            WslHandler["<b>WslTcpHandler</b><br/>/proc/net/tcp via WSL"]:::handler
-            DockerMgr["<b>WslDockerManager</b><br/>Auto-discover containers<br/>→ WslDockerTcpHandler × N"]:::handler
+            WslHandler["<b>WslTcpHandler</b><br/>/proc/net/tcp via WSL<br/>SubprocessDrain"]:::handler
+            DockerMgr["<b>WslDockerManager</b><br/>Persistent discovery subprocess<br/>Dict-based handler tracking<br/>→ WslDockerTcpHandler × N"]:::handler
+        end
+
+        subgraph SubprocessDrain["SubprocessDrain (Shared)"]
+            direction LR
+            DrainLoop["<b>drain loop</b><br/>while true; do<br/>  echo SENTINEL;<br/>  &lt;command&gt;;<br/>  sleep N; done"]:::drain
+            DrainQueue["<b>Queue</b><br/>Bounded (max 1000 lines)<br/>Daemon reader thread"]:::drain
+            DrainLogic["<b>drain()</b><br/>Returns lines since<br/>last sentinel only"]:::drain
         end
 
         subgraph Wakelock["Wakelock Engine"]
@@ -22,7 +29,7 @@ graph TB
     end
 
     subgraph Configuration["Configuration"]
-        ConfigFile["<b>config.toml</b><br/>• local/remote monitored ports<br/>• SSH port config<br/>• polling_interval<br/>• wsl_monitoring<br/>• wsl_docker_monitoring_max"]:::config
+        ConfigFile["<b>config.toml</b><br/>• local/remote monitored ports<br/>• SSH port config<br/>• polling_interval<br/>• wsl_monitoring<br/>• wsl_docker_monitoring_max<br/>• wsl_command_timeout<br/>• wsl_docker_discovery_interval"]:::config
         Defaults["<b>DEFAULTS</b><br/>Built-in fallback values"]:::config
     end
 
@@ -30,8 +37,8 @@ graph TB
         direction TB
         Iphlpapi["<b>iphlpapi.dll</b><br/>GetExtendedTcpTable<br/>Windows TCP table"]:::os
         Kernel32["<b>kernel32.dll</b><br/>SetThreadExecutionState<br/>Wake lock API"]:::os
-        WSL["<b>WSL /proc/net/tcp</b><br/>Persistent subprocess<br/>stdout → Queue → Parser"]:::os
-        Docker["<b>Docker in WSL</b><br/>docker ps (discovery)<br/>docker exec (polling)"]:::os
+        WSL["<b>WSL /proc/net/tcp</b><br/>Persistent subprocess<br/>stdout → Queue → Sentinel-based drain"]:::os
+        Docker["<b>Docker in WSL</b><br/>docker ps (discovery loop)<br/>docker exec (per-container polling)"]:::os
     end
 
     subgraph Utilities["Utilities & Tests"]
@@ -66,6 +73,14 @@ graph TB
     Acquire --> Kernel32
     Release --> Kernel32
 
+    %% SubprocessDrain used by handlers
+    WslHandler --> DrainLoop
+    WslHandler --> DrainQueue
+    WslHandler --> DrainLogic
+    DockerMgr --> DrainLoop
+    DockerMgr --> DrainQueue
+    DockerMgr --> DrainLogic
+
     %% Utilities
     DumpTool --> Iphlpapi
     WslScript -.-> WSL
@@ -77,6 +92,7 @@ graph TB
     classDef config fill:#8e44ad,stroke:#8e44ad,color:#fff
     classDef os fill:#7f8c8d,stroke:#7f8c8d,color:#fff
     classDef util fill:#95a5a6,stroke:#95a5a6,color:#fff
+    classDef drain fill:#16a085,stroke:#16a085,color:#fff
 ```
 
 ## Component Responsibilities
@@ -87,9 +103,10 @@ graph TB
 | **load_config()** | Configuration | Merge `config.toml` overrides with `DEFAULTS` |
 | **TcpConnectionMonitor** | Core | Orchestrates handlers, matches ports, tracks SSH duration, manages wakelock state |
 | **WindowsTcpHandler** | Handler | Reads Windows TCP table via `iphlpapi.GetExtendedTcpTable` |
-| **WslTcpHandler** | Handler | Reads WSL `/proc/net/tcp` via persistent subprocess + stdout queue |
-| **WslDockerManager** | Handler | Auto-discovers Docker containers, manages per-container handlers |
-| **WslDockerTcpHandler** | Handler | Reads a single container's `/proc/net/tcp` via `docker exec` |
+| **WslTcpHandler** | Handler | Reads WSL `/proc/net/tcp` via `SubprocessDrain` (persistent subprocess + queue + sentinel drain) |
+| **WslDockerManager** | Handler | Persistent discovery subprocess with sentinel-based iteration; dict-based handler tracking |
+| **WslDockerTcpHandler** | Handler | Reads a single container's `/proc/net/tcp` via `docker exec` + `SubprocessDrain` |
+| **SubprocessDrain** | Shared | Persistent subprocess lifecycle, bounded queue, daemon reader thread, sentinel-based iteration |
 | **Wakelock Engine** | OS Interface | Acquires/releases Windows wake lock via `kernel32.SetThreadExecutionState` |
 | **dump_iphlpapi.py** | Utility | Dumps raw TCP table buffer for binary analysis |
 | **wsl_tcp_monitor.sh** | Utility | WSL helper script for `/proc/net/tcp` monitoring |
@@ -109,6 +126,9 @@ flowchart LR
     WinHandler --> Iphlpapi["iphlpapi.dll"]
     WslHandler --> WSL["WSL /proc/net/tcp"]
     DockerMgr --> Docker["Docker in WSL"]
+
+    WslHandler --> Drain["SubprocessDrain<br/>loop + queue + sentinel"]
+    DockerMgr --> Drain
 
     WinHandler --> ActiveCheck{"has_active_connections()"}
     WslHandler --> ActiveCheck

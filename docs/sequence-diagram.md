@@ -10,6 +10,7 @@ sequenceDiagram
     participant WH as WindowsTcpHandler
     participant WSH as WslTcpHandler
     participant WD as WslDockerManager
+    participant DD as SubprocessDrain (discovery)
     participant WDC as WslDockerTcpHandler x N
     participant OS as OS / WSL / Docker
 
@@ -19,16 +20,20 @@ sequenceDiagram
 
     alt wsl_monitoring enabled
         TC->>WSH: WslTcpHandler(config)
-        WSH->>OS: wsl.exe -e bash -c "cat /proc/net/tcp"
+        WSH->>DD: SubprocessDrain(command, sentinel="/proc/net/tcp")
+        Note over WSH,DD: persistent loop: echo /proc/net/tcp#59; cat /proc/net/tcp#59; sleep N
     end
 
     alt wsl_docker_monitoring_max >= 1
         TC->>WD: WslDockerManager(config)
-        WD->>OS: wsl.exe docker ps --format '{{.ID}}'
-        OS-->>WD: container IDs
-        loop up to max_containers
-            WD->>WDC: WslDockerTcpHandler(config, container_id)
-            WDC->>OS: wsl.exe docker exec <id> sh -c "cat /proc/net/tcp"
+        WD->>DD: SubprocessDrain("docker ps --format...", sentinel="DISCOVERY")
+        Note over WD,DD: persistent loop: echo DISCOVERY#59; docker ps#59; sleep interval
+        WD->>DD: start()
+        DD->>OS: wsl.exe -e sh -c "while true#59; do echo DISCOVERY#59; docker ps#59; sleep N#59; done"
+        loop discovery interval
+            DD->>DD: drain() — returns lines after last DISCOVERY sentinel
+            DD-->>WD: container ID + name lines
+            WD->>WD: diff handlers, add new / remove stopped
         end
     end
 
@@ -40,15 +45,19 @@ sequenceDiagram
 
         alt WSL enabled
             TC->>WSH: get_connections()
-            WSH->>WSH: drain /proc/net/tcp lines
+            WSH->>DD: drain() — returns lines after /proc/net/tcp header
+            DD-->>WSH: tcp lines
+            WSH->>WSH: parse each line
             WSH-->>TC: connections
         end
 
         alt Docker enabled
             TC->>WD: get_connections()
-            loop each container handler
+            loop each handler in _handlers dict
                 WD->>WDC: get_connections()
-                WDC->>WDC: drain docker exec output
+                WDC->>DD: drain() — returns lines after header
+                DD-->>WDC: tcp lines
+                WDC->>WDC: parse, filter ESTABLISHED
                 WDC-->>WD: container connections
             end
             WD-->>TC: aggregated connections
@@ -68,49 +77,67 @@ sequenceDiagram
     end
 ```
 
-## Docker Container Discovery
+## Docker Container Discovery (Persistent Subprocess)
 
 ```mermaid
 sequenceDiagram
+    participant DD as SubprocessDrain
     participant WD as WslDockerManager
     participant OS as WSL / Docker
 
-    WD->>OS: wsl.exe docker ps --format '{{.ID}}'
-    alt docker installed + containers running
-        OS-->>WD: list of container IDs
-        WD->>WD: cap at wsl_docker_monitoring_max
-        WD->>WD: spawn WslDockerTcpHandler per container
-    else docker not installed
-        WD->>WD: print warning, return []
-    else no containers running
-        WD->>WD: return []
+    Note over DD: Persistent loop: echo DISCOVERY#59; docker ps#59; sleep N
+    DD->>OS: wsl.exe -e sh -c "while true#59; do echo DISCOVERY#59; docker ps --format '{{.ID}}\\t{{.Names}}'#59; sleep N#59; done"
+    OS-->>DD: stdout: DISCOVERY /n container lines /n DISCOVERY /n container lines /n ...
+
+    loop each polling cycle
+        WD->>DD: drain()
+        DD->>DD: find last DISCOVERY sentinel
+        DD->>DD: return lines after sentinel only
+        DD-->>WD: ["abc123\tcontainer1", "def456\tcontainer2", ...]
+        WD->>WD: diff current_ids vs _handlers keys
+        alt new container
+            WD->>WDC: WslDockerTcpHandler(config, container_id)
+            WDC->>DD: SubprocessDrain.start()
+            DD->>OS: docker exec <id> sh -c "while true#59; do cat /proc/net/tcp#59; sleep N#59; done"
+            OS-->>DD: /proc/net/tcp output
+        else stopped container
+            WD->>WDC: handler.cleanup()
+            WDC->>DD: stop()
+        end
     end
 ```
 
-## WSL Subprocess Lifecycle
+## WSL Subprocess Lifecycle (via SubprocessDrain)
 
 ```mermaid
 sequenceDiagram
     participant H as Handler
-    participant Q as stdout Queue
-    participant T as stdout Thread
+    participant DD as SubprocessDrain
+    participant Q as Queue (bounded)
+    participant T as drain thread
     participant P as subprocess
     participant OS as WSL
 
-    H->>H: _start_subprocess()
-    H->>P: wsl.exe -e bash -c "cat /proc/net/tcp"
+    H->>DD: SubprocessDrain(command, sentinel="/proc/net/tcp")
+    Note over DD: _full_command = "while true#59; do echo /proc/net/tcp#59; cat /proc/net/tcp#59; sleep N#59; done"
+
+    H->>DD: start()
+    DD->>P: wsl.exe -e sh -c "<_full_command>"
     P->>OS: runs inside WSL
-    OS-->>P: /proc/net/tcp output
+    OS-->>P: /proc/net/tcp output (repeated)
     P->>Q: stdout PIPE
-    H->>T: Thread(target=_stdout_reader, daemon=True)
-    T->>Q: puts lines into queue
+    H->>T: Thread(target=_drain_loop, args=(P, Q), daemon=True)
+    T->>Q: puts lines into queue continuously
+
     loop polling_interval
-        H->>Q: _drain_output()
-        Q-->>H: available lines
-        H->>H: parse each line
+        H->>DD: drain()
+        DD->>Q: get_nowait all available lines
+        DD->>DD: find last "/proc/net/tcp" sentinel
+        DD-->>H: lines after sentinel only
+        H->>H: parse each line (skip header line)
     end
-    H->>P: poll() — check alive
-    alt process died
-        H->>H: _start_subprocess() — restart
-    end
+
+    H->>DD: stop()
+    DD->>P: terminate() / kill()
+    DD->>T: join(timeout=3)
 ```

@@ -5,22 +5,33 @@ classDiagram
     class TcpConnectionSource {
         <<Protocol>>
         +get_connections() list[dict]
+        +cleanup() None
+        +unavailable bool
+    }
+
+    class SubprocessDrain {
+        -_process subprocess.Popen
+        -_queue Queue[str]
+        -_thread Thread
+        -_sentinel str | None
+        -_full_command str
+        +__init__(command, interval, sentinel, max_queue_lines)
+        +start() subprocess.Popen | None
+        +drain() list[str]
+        +alive bool
+        +stop() None
     }
 
     class TcpConnectionMonitor {
-        +ESTABLISHED = 0x01
-        +MIB_TCP_STATE_ESTAB = 5
-        +ES_CONTINUOUS = 0x80000000
-        +ES_SYSTEM_REQUIRED = 0x00000001
-        +AF_INET = 2
-        +TCP_TABLE_OWNER_PID_ALL = 5
-        +ERROR_INSUFFICIENT_BUFFER = 122
+        -_config dict
+        -_handlers list[TcpConnectionSource]
+        -_ssh_start_times dict
         +__init__(config)
         +is_monitored_active(connections, local_ports, remote_ports) bool
         +is_ssh_active(connections, local_ports, remote_ports, min_duration) bool
-        +format_active_connections(connections, show_wsl_label) list[str]
-        +_get_all_connections() list[dict]
-        +has_active_connections() bool
+        +format_connections(connections, show_source_label) list[str]
+        +get_all_connections() list[dict]
+        +has_active_connections(connections, config) bool
         +_acquire()
         +_release()
         +run()
@@ -34,33 +45,33 @@ classDiagram
     }
 
     class WindowsTcpHandler {
+        -_config dict
+        -_debug bool
         +__init__(config)
         +get_connections() list[dict]
+        +cleanup() None
     }
 
     class WslTcpConnectionHandler {
         <<abstract>>
         -_config dict
-        -_command str
-        -_process subprocess.Popen
-        -_stdout_queue queue.Queue
-        -_stdout_thread threading.Thread
-        -_unavailable str | None
+        -_drain SubprocessDrain
+        -_header_seen bool
+        -_debug bool
+        -_terminated bool
+        -_timeout int
         +__init__(config, command)
-        +_run_command(cmd) CompletedProcess
-        +_stdout_reader(process)
-        +_start_subprocess() subprocess.Popen
-        +_subprocess_alive(process) bool
+        +_kill_process_tree(process) None
         +_drain_output() list[str]
-        +_parse_proc_net_tcp_line(line) dict
+        +_parse_proc_net_tcp_line(line) dict | None
         +_tcp_state_is_active(state_hex) bool
         +get_connections() list[dict]
-        +unavailable str | None
+        +cleanup() None
+        +unavailable bool
     }
 
     class WslTcpHandler {
         +__init__(config)
-        +_wsl_available() bool
         +get_connections() list[dict]
     }
 
@@ -72,14 +83,15 @@ classDiagram
 
     class WslDockerManager {
         -_config dict
-        -_max_containers int
-        -_container_handlers list[WslDockerTcpHandler]
-        -_unavailable str | None
+        -_timeout int
+        -_discovery_interval int
+        -_handlers dict[str, WslDockerTcpHandler]
+        -_discover_drain SubprocessDrain
         +__init__(config)
-        +_run_command(cmd) CompletedProcess
-        +_discover_containers() list[str]
+        +_discover() None
         +get_connections() list[dict]
-        +unavailable str | None
+        +cleanup() None
+        +unavailable bool
     }
 
     TcpConnectionSource <|.. WindowsTcpHandler
@@ -89,11 +101,14 @@ classDiagram
     WslTcpConnectionHandler <|-- WslTcpHandler
     WslTcpConnectionHandler <|-- WslDockerTcpHandler
 
+    WslTcpConnectionHandler --> SubprocessDrain : uses
+    WslDockerManager --> SubprocessDrain : uses for discovery
+
     TcpConnectionMonitor --> WindowsTcpHandler : creates
     TcpConnectionMonitor --> WslTcpHandler : creates
     TcpConnectionMonitor --> WslDockerManager : creates conditionally
 
-    WslDockerManager --> WslDockerTcpHandler : manages multiple
+    WslDockerManager --> WslDockerTcpHandler : manages by dict key
 ```
 
 ## Handler Hierarchy
@@ -101,8 +116,9 @@ classDiagram
 ```
 TcpConnectionSource (Protocol)
 ├── WindowsTcpHandler          — Windows iphlpapi
-├── WslTcpConnectionHandler    — abstract base for WSL subprocess
+├── WslTcpConnectionHandler    — WSL subprocess via SubprocessDrain
 │   ├── WslTcpHandler          — /proc/net/tcp
 │   └── WslDockerTcpHandler    — docker exec <container> /proc/net/tcp
-└── WslDockerManager           — manages multiple WslDockerTcpHandler instances
+└── WslDockerManager           — dict-based handler tracking + persistent discovery
+    └── SubprocessDrain        — shared: loop + sentinel + drain thread + queue
 ```
