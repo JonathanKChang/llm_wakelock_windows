@@ -356,7 +356,7 @@ class WslDockerManager(TcpConnectionSource):
         max_containers = self._config.get("wsl_docker_monitoring_max", 0)
         if max_containers < 1:
             return
-        current_ids = {line.strip() for line in lines if line.strip()}
+        current_ids = [line.strip() for line in lines if line.strip()]
         # Remove stopped containers
         for cid in list(self._handlers):
             if cid not in current_ids:

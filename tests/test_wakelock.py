@@ -206,9 +206,9 @@ def test_format_connections_docker_label():
 
 
 def test_docker_container_discovery_respects_max():
-    """Docker discovery caps handlers at wsl_docker_monitoring_max."""
+    """Docker discovery caps handlers at wsl_docker_monitoring_max, keeps oldest on overflow."""
     mock_proc = MagicMock()
-    mock_proc.stdout = iter(["DISCOVERY", "abc123\tcontainer1", "def456\tcontainer2", "ghi789\tcontainer3", ""])
+    mock_proc.stdout = iter(["__SUBPROCESS_DRAIN__", "abc123", "def456", "ghi789", ""])
     mock_proc.poll = MagicMock(return_value=None)
     mock_run = MagicMock()
     mock_run.returncode = 0
@@ -219,12 +219,16 @@ def test_docker_container_discovery_respects_max():
         config = {"wsl_docker_monitoring_max": 2, "polling_interval": 5.0}
         manager = WslDockerManager(config)
         assert len(manager._handlers) == 2
+        # Pre-filter: oldest kept, new discarded — abc123 and def456 retained
+        assert "abc123" in manager._handlers
+        assert "def456" in manager._handlers
+        assert "ghi789" not in manager._handlers
 
 
-def test_docker_discovery_runs_on_time_interval():
-    """Discovery runs based on wall-clock time, not get_connections() calls."""
+def test_docker_discovery_runs_on_timer():
+    """Discovery runs on timer, not on every get_connections() call."""
     mock_proc = MagicMock()
-    mock_proc.stdout = iter(["DISCOVERY", "abc123\tcontainer1", "def456\tcontainer2", ""])
+    mock_proc.stdout = iter(["__SUBPROCESS_DRAIN__", "abc123", "def456", ""])
     mock_proc.poll = MagicMock(return_value=None)
     mock_run = MagicMock()
     mock_run.returncode = 0
@@ -235,20 +239,34 @@ def test_docker_discovery_runs_on_time_interval():
         config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0, "wsl_docker_discovery_interval": 10}
         manager = WslDockerManager(config)
         initial_count = len(manager._handlers)
-        # get_connections() calls don't trigger discovery anymore
+        # Rapid get_connections() calls don't trigger discovery (timer not expired)
         for _ in range(5):
             manager.get_connections()
-        assert len(manager._handlers) == initial_count  # no new discovery via get_connections
+        assert len(manager._handlers) == initial_count
 
 
 def test_docker_handler_no_containers():
     """Docker manager returns empty list when no containers are running."""
-    mock_result = MagicMock()
-    mock_result.returncode = 0
-    mock_result.stdout = ""
-    with patch("tcp_handlers.subprocess.run", return_value=mock_result), \
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter(["__SUBPROCESS_DRAIN__", ""])
+    mock_proc.poll = MagicMock(return_value=None)
+    mock_run = MagicMock()
+    mock_run.returncode = 0
+    mock_run.stdout = "ok"
+    with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
+         patch("tcp_handlers.subprocess.run", return_value=mock_run), \
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
         config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0}
         manager = WslDockerManager(config)
         assert manager.get_connections() == []
         assert manager.unavailable is False  # no containers != unavailable
+
+
+def test_drain_timeout_blocks_for_output():
+    """drain(timeout) blocks until output arrives or timeout expires."""
+    drain = tcp_handlers.SubprocessDrain(
+        "echo hello", interval=1.0, max_queue_lines=100
+    )
+    # Without a running process, drain should return empty on timeout
+    result = drain.drain(timeout=0.1)
+    assert result == []
