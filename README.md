@@ -21,15 +21,20 @@ I can't be the only one who's repurposed a gaming Windows PC to serve LLMs, sinc
 
 ## Best suited for power-optimized machines
 
-This tool works best on machines where you want to **optimize power usage** — letting the system sleep when idle, but keeping it awake when you need it. Hybrid sleep may need to be disabled.
+This tool works best on machines where you want to **optimize power usage** — letting the system sleep when idle, but keeping it awake when you need it. These common activities do not grab a wakelock and will allow Windows to sleep, whether running natively in Windows, in WSL, or in a Docker:
+- **Long agentic sessions** — local inference servers (llama.cpp, Ollama, etc.), despite using significant CPU/GPU 
+- **SSH sessions** — Active SSH sessions, incoming or outgoing.
+
 
 A typical setup:
 
-1. The machine sleeps when idle to save power.
-2. You (or an automation script) send a **Wake-on-LAN magic packet** to wake it when you need to access it.
-3. Once awake, this tool prevents the machine from sleeping **during** active work:
-   - **Long LLM sessions** — local inference servers (llama.cpp, Ollama) don't grab a wakelock on their own, so the machine could sleep mid-generation. This tool watches the server ports and keeps the system awake.
-   - **SSH sessions** — whether you're SSH'd into this machine or its WSL or SSH'd out to another one, this prevents sleep during active remote work.
+- Windows Gaming PC
+   - Serves LLM Inference
+   - Hosts WSL running an agentic harness in a tmux
+   - Automatically set to sleep when idle
+- Remote access - Laptop or Phone
+   - Manually or automatically send a **Wake-on-LAN magic packet** to the PC if needed
+   - Check in on the agents via SSH over tailscale
 
 ### Why the SSH minimum duration?
 
@@ -53,14 +58,6 @@ Copy `config.toml` from the script directory and uncomment the values you want t
 | `wsl_docker_monitoring_max` | `0` | Max Docker containers to monitor (0 = disabled) |
 | `wsl_command_timeout` | `10` | Timeout for all WSL commands (seconds) |
 | `wsl_docker_discovery_interval` | `10` | Poll cycles between Docker container discovery scans |
-
-Example `config.toml`:
-
-```toml
-# Uncomment and change to override defaults
-# local_monitored_ports = [8080, 11434]
-# ssh_min_duration = 30.0
-```
 
 ### Adding a new service
 
