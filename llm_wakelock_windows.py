@@ -35,6 +35,7 @@ DEFAULTS = {
     "remote_ssh_ports": [],
     "ssh_min_duration": 30.0,
     "polling_interval": 5.0,
+    "grace_period_minutes": 0,
 }
 
 _config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.toml")
@@ -49,6 +50,7 @@ LOCAL_SSH_PORTS = config["local_ssh_ports"]
 REMOTE_SSH_PORTS = config["remote_ssh_ports"]
 SSH_MIN_DURATION = config["ssh_min_duration"]
 POLLING_INTERVAL = config["polling_interval"]
+GRACE_PERIOD_MINUTES = config["grace_period_minutes"]
 
 pprint.pprint(config, sort_dicts=False)
 
@@ -72,7 +74,7 @@ def release():
 
     # Pulse the wake-lock flag briefly to reset idle timer
     ctypes.windll.kernel32.SetThreadExecutionState(ES_SYSTEM_REQUIRED)
-    
+    time.sleep(1)
     ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
 
 
@@ -165,32 +167,41 @@ def has_active_connections(ssh_start_times):
     connections = get_established_tcp_connections()
     return is_monitored_active(connections) or is_ssh_active(connections, ssh_start_times)
 
+def is_relevant(conn):
+    return (
+        conn["local_port"] in LOCAL_MONITORED_PORTS
+        or conn["remote_port"] in REMOTE_MONITORED_PORTS
+        or conn["local_port"] in LOCAL_SSH_PORTS
+        or conn["remote_port"] in REMOTE_SSH_PORTS
+    )
 
 wakelock = False
+inactive_since = None
 ssh_start_times = {}
+GRACE_PERIOD_SECONDS = GRACE_PERIOD_MINUTES * 60
 
 while True:
-    # Get current connections
     connections = get_established_tcp_connections()
     active = is_monitored_active(connections) or is_ssh_active(connections, ssh_start_times)
-    now = datetime.datetime.now().isoformat()
+    now = datetime.datetime.now()
 
-    if active and not wakelock:
-        acquire()
-        # Print date/time and relevant connection info
-        relevant_str = "\n".join([
-            str(conn) for conn in connections
-            if conn["local_port"] in LOCAL_MONITORED_PORTS
-               or conn["remote_port"] in REMOTE_MONITORED_PORTS
-               or conn["local_port"] in LOCAL_SSH_PORTS
-               or conn["remote_port"] in REMOTE_SSH_PORTS
-        ])
-        print(f"[{now}] Grabbing wakelock due to active connections: \n{relevant_str}")
-        wakelock = True
+    if active:
+        inactive_since = None
+        if not wakelock:
+            relevant_str = "\n".join(map(str, filter(is_relevant, connections)))
+            print(f"[{now}] Acquiring wakelock due to active connections:\n{relevant_str}")
+            acquire()
+            wakelock = True
 
-    elif not active and wakelock:
-        release()
-        print(f"[{now}] Releasing wakelock")
-        wakelock = False
+    elif wakelock:
+        if inactive_since is None:
+            print(f"[{now}] No more active connections")
+            inactive_since = now
+
+        if now - inactive_since >= GRACE_PERIOD_SECONDS:
+            print(f"[{now}] Releasing wakelock")
+            release()
+            wakelock = False
+            inactive_since = None
 
     time.sleep(POLLING_INTERVAL)

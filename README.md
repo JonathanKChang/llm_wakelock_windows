@@ -39,6 +39,7 @@ local_ssh_ports = []
 remote_ssh_ports = []
 ssh_min_duration = 30.0   # seconds — prevents short scripts (git fetch, etc.) from triggering
 polling_interval = 5.0    # seconds
+grace_period_minutes = 30  # extend wakelock N minutes after last connection
 ```
 
 ### Adding a new service
@@ -48,6 +49,10 @@ Add its port to the monitored port lists:
 ```toml
 local_monitored_ports = [8080, 11434, 5432]  # llama.cpp + Ollama + local PostgreSQL
 ```
+
+### Grace period
+
+Set `grace_period_minutes` to keep the wakelock active for N minutes after the last monitored connection drops. Some systems make it difficult to effectively reset the idle timer when releasing the wakelock.
 
 ### Adding SSH support
 
