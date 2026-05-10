@@ -19,6 +19,7 @@ import tomllib
 import os
 import signal
 import pprint
+import ctypes
 from tcp_handlers import (
     ConnectionSource,
     TcpConnectionSource,
@@ -35,6 +36,7 @@ DEFAULTS = {
     "remote_ssh_ports": [],
     "ssh_min_duration": 30.0,
     "polling_interval": 5.0,
+    "grace_period_minutes": 30,
     "wsl_monitoring": False,
     "wsl_docker_monitoring_max": 0,
     "wsl_command_timeout": 10,
@@ -62,6 +64,8 @@ class TcpConnectionMonitor:
     def __init__(self, config: dict) -> None:
         self._config = config
         self._debug = config.get("debug", False)
+        self._inactive_since: datetime.datetime | None = None
+        self._grace_period_seconds = config['grace_period_minutes'] * 60
         self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
         if config["wsl_monitoring"]:
             self._handlers.append(WslTcpHandler(config))
@@ -78,6 +82,14 @@ class TcpConnectionMonitor:
             if conn["remote_port"] in remote_ports:
                 return True
         return False
+    
+    def is_relevant(self,conn):
+        return (
+            conn["local_port"] in self._config["local_monitored_ports"]
+            or conn["remote_port"] in self._config["remote_monitored_ports"]
+            or conn["local_port"] in self._config["local_ssh_ports"]
+            or conn["remote_port"] in self._config["remote_ssh_ports"]
+        )
 
     def is_ssh_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int], min_duration: float) -> bool:
         """Check if any SSH connections have been active for at least min_duration.
@@ -136,15 +148,14 @@ class TcpConnectionMonitor:
 
     def _acquire(self) -> None:
         """Acquires system wake lock to prevent sleep."""
-        import ctypes
         ctypes.windll.kernel32.SetThreadExecutionState(
             self._ES_CONTINUOUS | self._ES_SYSTEM_REQUIRED
         )
 
     def _release(self) -> None:
-        """Resets idle timer then releases system wake lock."""
-        import ctypes
+        """Attempts to reset idle timer then releases system wake lock."""
         ctypes.windll.kernel32.SetThreadExecutionState(self._ES_SYSTEM_REQUIRED)
+        time.sleep(1)
         ctypes.windll.kernel32.SetThreadExecutionState(self._ES_CONTINUOUS)
 
     def run(self) -> None:
@@ -166,30 +177,29 @@ class TcpConnectionMonitor:
         while True:
             all_conns = self.get_all_connections()
             active = self.has_active_connections(all_conns, self._config)
-            now = datetime.datetime.now().isoformat()
+            now = datetime.datetime.now()
 
             if self._debug:
                     print(f"[{now}] [DEBUG]: all connections):\n" + "\n".join(self.format_connections(all_conns)))
 
-            if active and not wakelock:
-                self._acquire()
-                wakelock = True
-                if not all_conns:
-                    print("[WARN] active=True but no connections returned — this should not happen")
-                else:
-                    relevant_conns = [
-                        conn for conn in all_conns
-                        if (conn["local_port"] in self._config["local_monitored_ports"]
-                            or conn["remote_port"] in self._config["remote_monitored_ports"]
-                            or conn["local_port"] in self._config["local_ssh_ports"]
-                            or conn["remote_port"] in self._config["remote_ssh_ports"])
-                    ]
-                    print(f"[{now}] Grabbing wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
+            if active:
+                self._inactive_since = None
+                if not wakelock:
+                    relevant_str = "\n".join(self.format_connections(filter(self.is_relevant, all_conns)))
+                    print(f"[{now}] Acquiring wakelock due to active connections:\n{relevant_str}")
+                    self._acquire()
+                    wakelock = True
 
-            elif not active and wakelock:
-                self._release()
-                wakelock = False
-                print(f"[{now}] Releasing wakelock")
+            elif wakelock:
+                if self._inactive_since is None:
+                    print(f"[{now}] No more active connections")
+                    self._inactive_since = now
+
+                if (now - self._inactive_since).total_seconds() >= self._grace_period_seconds:
+                    print(f"[{now}] Releasing wakelock")
+                    self._release()
+                    wakelock = False
+                    self._inactive_since = None
 
             time.sleep(self._config["polling_interval"])
 
