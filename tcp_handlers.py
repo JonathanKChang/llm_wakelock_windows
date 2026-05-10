@@ -1,6 +1,7 @@
 """TCP connection handlers for Windows, WSL, and Docker-in-WSL."""
 import subprocess
 import threading
+import time
 import queue
 import ctypes
 import socket
@@ -334,46 +335,53 @@ class WslDockerManager(TcpConnectionSource):
         self.unavailable: bool = False
         self._timeout = config.get("wsl_command_timeout", 10)
         self._discovery_interval = config.get("wsl_docker_discovery_interval", 10)
+        self._last_discovery_time: float = 0.0
         self._handlers: dict[str, WslDockerTcpHandler] = {}
         self._discover_drain = SubprocessDrain(
-            f"docker ps --format '{{{{.ID}}}}\\t{{{{.Names}}}}'",
+            f"docker ps --format '{{{{.ID}}}}'",
             interval=self._discovery_interval,
-            sentinel="DISCOVERY",
             max_queue_lines=1000,
         )
         self._discover_drain.start()
-        self._discover()
+        # Initial discovery — drain() waits for output, no race condition
+        initial_lines = self._discover_drain.drain(timeout=self._timeout)
+        if initial_lines:
+            self._discover(initial_lines)
 
-    def _discover(self) -> None:
-        """Parse accumulated docker ps output, diff against _handlers, add/remove containers, enforce max cap."""
+    def _discover(self, lines: list[str]) -> None:
+        """Parse docker ps output, diff against _handlers, add/remove containers, enforce max cap.
+
+        Pre-filters new containers by max cap: keeps existing, discards new.
+        """
         max_containers = self._config.get("wsl_docker_monitoring_max", 0)
         if max_containers < 1:
             return
-        lines = self._discover_drain.drain()
-        if not lines:
-            return
-        current_ids = {line.split("\t")[0].strip() for line in lines if line.strip()}
+        current_ids = {line.strip() for line in lines if line.strip()}
         # Remove stopped containers
         for cid in list(self._handlers):
             if cid not in current_ids:
                 self._handlers[cid].cleanup()
                 del self._handlers[cid]
-        # Add new containers
+        # Add new containers (up to remaining cap)
+        remaining = max_containers - len(self._handlers)
         for cid in current_ids:
-            if cid not in self._handlers:
+            if cid not in self._handlers and remaining > 0:
                 handler = WslDockerTcpHandler(self._config, cid)
                 if not handler.unavailable:
                     self._handlers[cid] = handler
-        # Enforce max cap (FIFO: remove oldest by insertion order = dict order)
-        while len(self._handlers) > max_containers:
-            oldest = next(iter(self._handlers))
-            self._handlers[oldest].cleanup()
-            del self._handlers[oldest]
+                    remaining -= 1
 
     def get_connections(self) -> list[dict]:
         """Aggregate connections from all container handlers."""
         if self.unavailable:
             return []
+        # Timer-based discovery
+        if self._discovery_interval > 0 and (self._last_discovery_time == 0 or
+                time.time() - self._last_discovery_time >= self._discovery_interval):
+            lines = self._discover_drain.drain(timeout=self._timeout)
+            if lines:
+                self._discover(lines)
+                self._last_discovery_time = time.time()
         all_conns: list[dict] = []
         for handler in self._handlers.values():
             all_conns.extend(handler.get_connections())
