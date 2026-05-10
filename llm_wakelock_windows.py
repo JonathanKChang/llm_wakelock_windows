@@ -183,10 +183,12 @@ class TcpConnectionMonitor:
                     print(f"[{now}] [DEBUG]: all connections):\n" + "\n".join(self.format_connections(all_conns)))
 
             if active:
-                self._inactive_since = None
+                relevant_conns = list(filter(self.is_relevant, all_conns))
+                if wakelock and self._inactive_since is not None:
+                    print(f"[{now}] Active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
+                    self._inactive_since = None
                 if not wakelock:
-                    relevant_str = "\n".join(self.format_connections(filter(self.is_relevant, all_conns)))
-                    print(f"[{now}] Acquiring wakelock due to active connections:\n{relevant_str}")
+                    print(f"[{now}] Acquiring wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
                     self._acquire()
                     wakelock = True
 
