@@ -64,8 +64,7 @@ class TcpConnectionMonitor:
     def __init__(self, config: dict) -> None:
         self._config = config
         self._debug = config.get("debug", False)
-        self._inactive_since: datetime.datetime | None = None
-        self._grace_period_seconds = config['grace_period_minutes'] * 60
+
         self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
         if config["wsl_monitoring"]:
             self._handlers.append(WslTcpHandler(config))
@@ -173,7 +172,9 @@ class TcpConnectionMonitor:
         signal.signal(signal.SIGINT, _signal_handler)
         signal.signal(signal.SIGTERM, _signal_handler)
 
+        inactive_since: datetime.datetime | None = None
         wakelock = False
+        grace_period_seconds = config['grace_period_minutes'] * 60
         while True:
             all_conns = self.get_all_connections()
             active = self.has_active_connections(all_conns, self._config)
@@ -184,24 +185,24 @@ class TcpConnectionMonitor:
 
             if active:
                 relevant_conns = list(filter(self.is_relevant, all_conns))
-                if wakelock and self._inactive_since is not None:
+                if wakelock and inactive_since is not None:
                     print(f"[{now}] Active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
-                    self._inactive_since = None
-                if not wakelock:
+                    inactive_since = None
+                elif not wakelock:
                     print(f"[{now}] Acquiring wakelock due to active connections:\n" + "\n".join(self.format_connections(relevant_conns)))
                     self._acquire()
                     wakelock = True
 
             elif wakelock:
-                if self._inactive_since is None:
+                if inactive_since is None:
                     print(f"[{now}] No more active connections")
-                    self._inactive_since = now
+                    inactive_since = now
 
-                if (now - self._inactive_since).total_seconds() >= self._grace_period_seconds:
+                if (now - inactive_since).total_seconds() >= grace_period_seconds:
                     print(f"[{now}] Releasing wakelock")
                     self._release()
                     wakelock = False
-                    self._inactive_since = None
+                    inactive_since = None
 
             time.sleep(self._config["polling_interval"])
 
