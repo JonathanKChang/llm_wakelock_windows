@@ -15,24 +15,25 @@ class ConnectionSource(Enum):
     WSL_DOCKER = 2
 
 
+DEFAULT_SENTINEL = "__SUBPROCESS_DRAIN__"
+
+
 class SubprocessDrain:
     """Persistent subprocess that runs a command in a loop, draining stdout into a queue.
 
     Constructs the loop: `while true; do echo <sentinel>; <command>; sleep <interval>; done`
-    drain() returns only lines after the most recent sentinel, discarding stale data
-    before any sentinel (e.g. from a subprocess restart).
+    drain() always waits up to `timeout` for the first line, then drains the rest.
+    Returns only lines after the most recent sentinel, discarding stale data.
     """
 
-    def __init__(self, command: str, interval: float = 5.0, sentinel: str | None = None, max_queue_lines: int = 1000) -> None:
+    def __init__(self, command: str, interval: float = 5.0, sentinel: str = DEFAULT_SENTINEL,
+                 max_queue_lines: int = 1000, debug_callback=None) -> None:
         self._process: subprocess.Popen | None = None
         self._queue: queue.Queue[str] = queue.Queue(maxsize=max_queue_lines)
         self._thread: threading.Thread | None = None
         self._sentinel = sentinel
-        # Build the full shell command: loop + sentinel + command + sleep
-        if sentinel:
-            self._full_command = f"while true; do echo {sentinel}; {command}; sleep {interval}; done"
-        else:
-            self._full_command = f"while true; do {command}; sleep {interval}; done"
+        self._debug_callback = debug_callback
+        self._full_command = f"while true; do echo {sentinel}; {command}; sleep {interval}; done"
 
     def start(self) -> subprocess.Popen | None:
         """Spawn the persistent subprocess and start the drain thread."""
@@ -61,25 +62,30 @@ class SubprocessDrain:
         except Exception:
             pass
 
-    def drain(self) -> list[str]:
-        """Drain lines since the most recent sentinel (or all lines if no sentinel)."""
+    def drain(self, timeout: float = 5.0) -> list[str]:
+        """Drain lines since the most recent sentinel.
+
+        Always waits up to `timeout` for the first line, then drains the rest.
+        """
         lines: list[str] = []
+        try:
+            lines.append(self._queue.get(timeout=timeout))
+        except queue.Empty:
+            return []
         while not self._queue.empty():
             try:
                 lines.append(self._queue.get_nowait())
             except queue.Empty:
                 break
-        if self._sentinel is None:
-            return lines
         # Find last sentinel; return only lines after it
         last_idx = None
         for i, line in enumerate(lines):
             if self._sentinel in line:
                 last_idx = i
-        if last_idx is not None:
-            return lines[last_idx + 1:]
-        # No sentinel seen — stale data from before discovery started
-        return []
+        result = lines[last_idx + 1:] if last_idx is not None else lines
+        if self._debug_callback and result:
+            self._debug_callback(self._full_command, len(result))
+        return result
 
     @property
     def alive(self) -> bool:
