@@ -21,6 +21,9 @@
 # How often to poll the TCP table (seconds).
 # polling_interval = 5.0
 
+# Extend the wakelock for this many minutes after the last monitored connection.
+# grace_period_minutes = 30
+
 # Enable monitoring of WSL2 TCP connections via /proc/net/tcp.
 # When enabled, the same port/SSH config applies to both Windows and WSL2 connections.
 # wsl_monitoring = false
