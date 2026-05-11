@@ -16,7 +16,8 @@ class ConnectionSource(Enum):
     WSL_DOCKER = 2
 
 
-DEFAULT_SENTINEL = "__SUBPROCESS_DRAIN__"
+class SentinelNotFound(Exception):
+    """Raised when drain() gets output but no sentinel - subprocess loop broke."""
 
 
 class SubprocessDrain:
@@ -27,8 +28,8 @@ class SubprocessDrain:
     Returns only lines after the most recent sentinel, discarding stale data.
     """
 
-    def __init__(self, command: str, interval: float = 5.0, sentinel: str = DEFAULT_SENTINEL,
-                 max_queue_lines: int = 1000, debug_callback=None) -> None:
+    def __init__(self, command: str, interval: float = 5.0, sentinel: str = "__SUBPROCESS_DRAIN__",
+                 max_queue_lines: int = 1000, timeout: float = 10.0) -> None:
         self._process: subprocess.Popen | None = None
         self._queue: queue.Queue[str] = queue.Queue(maxsize=max_queue_lines)
         self._thread: threading.Thread | None = None
@@ -68,6 +69,7 @@ class SubprocessDrain:
         """Drain lines since the most recent sentinel.
 
         Always waits up to `timeout` for the first line, then drains the rest.
+        Raises SentinelNotFound if output contains no sentinel.
         """
         lines: list[str] = []
         try:
@@ -84,10 +86,9 @@ class SubprocessDrain:
         for i, line in enumerate(lines):
             if self._sentinel in line:
                 last_idx = i
-        result = lines[last_idx + 1:] if last_idx is not None else lines
-        if self._debug_callback and result:
-            self._debug_callback(self._full_command, len(result))
-        return result
+        if last_idx is None:
+            raise SentinelNotFound(f"no sentinel found in drain output - subprocess loop may have broken: \n  '{self._command}'")
+        return lines[last_idx + 1:]
 
     @property
     def alive(self) -> bool:
@@ -135,7 +136,7 @@ class WindowsTcpHandler:
         self._debug = config.get("debug", False)
 
     def cleanup(self) -> None:
-        """No-op — Windows handler uses iphlpapi, no subprocesses to clean up."""
+        """No-op - Windows handler uses iphlpapi, no subprocesses to clean up."""
         pass
 
     def get_connections(self) -> list[dict]:
@@ -286,7 +287,7 @@ class WslTcpHandler(WslTcpConnectionHandler):
     """Handles WSL TCP connection retrieval via /proc/net/tcp."""
 
     def __init__(self, config: dict) -> None:
-        cmd = f"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done"
+        cmd = f"cat /proc/net/tcp"
         super().__init__(config, cmd)
         print("[INFO] WSL monitoring started")
 
@@ -335,7 +336,7 @@ class WslDockerManager(TcpConnectionSource):
         self._drain = SubprocessDrain(
             "docker ps --format '{{.ID}}'",
             interval=self._discovery_interval,
-            max_queue_lines=1000,
+            timeout=self._timeout,
         )
         self._drain.start()
         self._discover()
@@ -372,9 +373,11 @@ class WslDockerManager(TcpConnectionSource):
         for cid in current_ids:
             if cid not in self._handlers and remaining > 0:
                 handler = WslDockerTcpHandler(self._config, cid)
-                if not handler.unavailable:
+                if not handler._stopped:
                     self._handlers[cid] = handler
                     remaining -= 1
+
+        self._last_discovery_time = time.time()
 
     def get_connections(self) -> list[dict]:
         """Aggregate connections from all container handlers."""

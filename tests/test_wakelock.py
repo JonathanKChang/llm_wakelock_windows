@@ -8,6 +8,7 @@
 """
 
 from unittest.mock import patch, MagicMock
+import pytest
 import time
 
 import llm_wakelock_windows as mod
@@ -259,7 +260,7 @@ def test_docker_handler_no_containers():
         config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0}
         manager = WslDockerManager(config)
         assert manager.get_connections() == []
-        assert manager.unavailable is False  # no containers != unavailable
+        assert manager._stopped is False  # no containers != unavailable
 
 
 def test_drain_timeout_blocks_for_output():
@@ -270,3 +271,25 @@ def test_drain_timeout_blocks_for_output():
     # Without a running process, drain should return empty on timeout
     result = drain.drain(timeout=0.1)
     assert result == []
+
+
+def test_drain_no_sentinel_raises():
+    """Edge case: output without sentinel raises SentinelNotFound (subprocess loop broke)."""
+    drain = tcp_handlers.SubprocessDrain(
+        "echo hello", interval=1.0, max_queue_lines=100
+    )
+    drain._queue.put("some output without sentinel\n")
+    with pytest.raises(tcp_handlers.SentinelNotFound):
+        drain.drain(timeout=0.1)
+
+
+def test_handler_empty_output_does_not_mark_unavailable():
+    """Edge case: drain returns empty → handler stays available (next alive check handles it)."""
+    mock_proc = MagicMock()
+    mock_proc.stdout = iter([])
+    mock_proc.poll = MagicMock(return_value=None)
+    with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
+         patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
+        handler = WslTcpHandler({"polling_interval": 1.0, "wsl_monitoring": True, "wsl_command_timeout": 0.1})
+        handler.get_connections()
+        assert handler._stopped is False  # empty output is normal, not an error
