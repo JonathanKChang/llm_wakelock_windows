@@ -33,8 +33,9 @@ class SubprocessDrain:
         self._queue: queue.Queue[str] = queue.Queue(maxsize=max_queue_lines)
         self._thread: threading.Thread | None = None
         self._sentinel = sentinel
-        self._debug_callback = debug_callback
-        self._full_command = f"while true; do echo {sentinel}; {command}; sleep {interval}; done"
+        self._command = command
+        self._timeout = timeout
+        self._full_command = f"while true; do echo {sentinel}; {command} || break; sleep {interval}; done"
 
     def start(self) -> subprocess.Popen | None:
         """Spawn the persistent subprocess and start the drain thread."""
@@ -98,15 +99,15 @@ class SubprocessDrain:
         if self._process is not None:
             try:
                 self._process.terminate()
-                self._process.wait(timeout=3)
+                self._process.wait(timeout=self._timeout)
             except (subprocess.TimeoutExpired, OSError, ValueError):
                 try:
                     self._process.kill()
-                    self._process.wait(timeout=3)
+                    self._process.wait(timeout=self._timeout)
                 except (subprocess.TimeoutExpired, OSError, ValueError):
                     pass
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=3)
+            self._thread.join(timeout=self._timeout)
 
 
 class TcpConnectionSource(Protocol):
@@ -201,10 +202,9 @@ class WslTcpConnectionHandler:
         self._drain = SubprocessDrain(
             command,
             interval=config["polling_interval"],
-            sentinel="/proc/net/tcp",
+            timeout=config.get("wsl_command_timeout", 10),
         )
         self._debug = config.get("debug", False)
-        self._terminated = False
         self._timeout = config.get("wsl_command_timeout", 10)
         if self._drain.start() is None:
             self._stopped = True
@@ -255,12 +255,9 @@ class WslTcpConnectionHandler:
         if self._stopped:
             return []
         if not self._drain.alive:
-            self._drain.start()
-            if not self._drain.alive:
-                if not self.unavailable:
-                    self.unavailable = True
-                    print("[WARN] wsl.exe not available — WSL connections will not be monitored")
-                return []
+            self._stopped = True
+            print("[WARN] wsl.exe not available - WSL connections will not be monitored")
+            return []
 
         try:
             lines = self._drain.drain(timeout=self._timeout)
@@ -310,7 +307,7 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
 
     def __init__(self, config: dict, container_id: str) -> None:
         short_id = container_id[:12]
-        cmd = f"docker exec {short_id} sh -c \"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done\""
+        cmd = f"docker exec {short_id} sh -c 'cat /proc/net/tcp'"
         super().__init__(config, cmd)
         self._container_id = short_id
 
