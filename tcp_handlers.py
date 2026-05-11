@@ -114,7 +114,7 @@ class TcpConnectionSource(Protocol):
 
     def get_connections(self) -> list[dict]: ...
     def cleanup(self) -> None: ...
-    unavailable: bool
+    _stopped: bool
 
 
 # ── Handlers ───────────────────────────────────────────────────────────────────
@@ -130,7 +130,7 @@ class WindowsTcpHandler:
 
     def __init__(self, config: dict) -> None:
         self._config = config
-        self.unavailable: bool = False
+        self._stopped = False
         self._debug = config.get("debug", False)
 
     def cleanup(self) -> None:
@@ -197,7 +197,7 @@ class WslTcpConnectionHandler:
 
     def __init__(self, config: dict, command: str) -> None:
         self._config = config
-        self.unavailable: bool = False
+        self._stopped = False
         self._drain = SubprocessDrain(
             command,
             interval=config["polling_interval"],
@@ -206,12 +206,15 @@ class WslTcpConnectionHandler:
         self._debug = config.get("debug", False)
         self._terminated = False
         self._timeout = config.get("wsl_command_timeout", 10)
+        if self._drain.start() is None:
+            self._stopped = True
+            print(f"[WARN] WSL is not accessible - this container will not be monitored")
 
     def cleanup(self) -> None:
         """Terminate the WSL subprocess and its child process tree."""
-        if self._terminated:
+        if self._stopped:
             return
-        self._terminated = True
+        self._stopped = True
         self._drain.stop()
 
     @staticmethod
@@ -249,7 +252,7 @@ class WslTcpConnectionHandler:
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from the subprocess."""
-        if self._terminated:
+        if self._stopped:
             return []
         if not self._drain.alive:
             self._drain.start()
@@ -259,10 +262,11 @@ class WslTcpConnectionHandler:
                     print("[WARN] wsl.exe not available — WSL connections will not be monitored")
                 return []
 
-        lines = self._drain.drain(timeout=self._timeout)
-        if not lines:
-            if not self._drain.alive:
-                self._drain.start()
+        try:
+            lines = self._drain.drain(timeout=self._timeout)
+        except SentinelNotFound:
+            self._stopped = True
+            print(f"[WARN] no sentinel found - will not monitor: \n  '{self._drain._command}'")
             return []
 
         if self._debug and lines:
@@ -291,7 +295,7 @@ class WslTcpHandler(WslTcpConnectionHandler):
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from WSL /proc/net/tcp."""
-        if self.unavailable:
+        if self._stopped:
             return []
         if not self._config["wsl_monitoring"]:
             return []
@@ -309,16 +313,10 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         cmd = f"docker exec {short_id} sh -c \"while true; do cat /proc/net/tcp; sleep {config['polling_interval']}; done\""
         super().__init__(config, cmd)
         self._container_id = short_id
-        # Check docker accessibility by trying to start the subprocess
-        if self._drain.start() is None:
-            self.unavailable = True
-            print(f"[WARN] docker container {short_id} not accessible — this container will not be monitored")
-        else:
-            print(f"[INFO] WSL-Docker {short_id} monitoring started")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from Docker container."""
-        if self.unavailable:
+        if self._stopped:
             return []
         conns = super().get_connections()
         for c in conns:
@@ -332,27 +330,37 @@ class WslDockerManager(TcpConnectionSource):
 
     def __init__(self, config: dict) -> None:
         self._config = config
-        self.unavailable: bool = False
+        self._stopped = False
         self._timeout = config.get("wsl_command_timeout", 10)
         self._discovery_interval = config.get("wsl_docker_discovery_interval", 10)
         self._last_discovery_time: float = 0.0
         self._handlers: dict[str, WslDockerTcpHandler] = {}
-        self._discover_drain = SubprocessDrain(
-            f"docker ps --format '{{{{.ID}}}}'",
+        self._drain = SubprocessDrain(
+            "docker ps --format '{{.ID}}'",
             interval=self._discovery_interval,
             max_queue_lines=1000,
         )
-        self._discover_drain.start()
-        # Initial discovery — drain() waits for output, no race condition
-        initial_lines = self._discover_drain.drain(timeout=self._timeout)
-        if initial_lines:
-            self._discover(initial_lines)
+        self._drain.start()
+        self._discover()
+        print("[INFO] Docker lifecycle monitoring started")
 
-    def _discover(self, lines: list[str]) -> None:
-        """Parse docker ps output, diff against _handlers, add/remove containers, enforce max cap.
+    def _discover(self) -> None:
+        """Drain docker ps output, handle errors, then diff against _handlers."""
+        if self._stopped:
+            return
+        if not self._drain.alive:
+            self._stopped = True
+            print("[WARN] docker is not available - docker connections will not be monitored")
+            return
 
-        Pre-filters new containers by max cap: keeps existing, discards new.
-        """
+        try:
+            lines = self._drain.drain(timeout=self._timeout)
+        except SentinelNotFound:
+            self._stopped = True
+            print(f"[WARN] no sentinel found in discovery - will not monitor: \n  '{self._drain._command}'")
+            return
+        if not lines:
+            return  # no output yet, skip discovery this cycle
         max_containers = self._config.get("wsl_docker_monitoring_max", 0)
         if max_containers < 1:
             return
@@ -373,15 +381,12 @@ class WslDockerManager(TcpConnectionSource):
 
     def get_connections(self) -> list[dict]:
         """Aggregate connections from all container handlers."""
-        if self.unavailable:
+        if self._stopped:
             return []
         # Timer-based discovery
         if self._discovery_interval > 0 and (self._last_discovery_time == 0 or
                 time.time() - self._last_discovery_time >= self._discovery_interval):
-            lines = self._discover_drain.drain(timeout=self._timeout)
-            if lines:
-                self._discover(lines)
-                self._last_discovery_time = time.time()
+            self._discover()
         all_conns: list[dict] = []
         for handler in self._handlers.values():
             all_conns.extend(handler.get_connections())
@@ -391,4 +396,4 @@ class WslDockerManager(TcpConnectionSource):
         """Clean up all container handler subprocesses and the discovery process."""
         for handler in self._handlers.values():
             handler.cleanup()
-        self._discover_drain.stop()
+        self._drain.stop()
