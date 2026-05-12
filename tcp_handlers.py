@@ -119,10 +119,17 @@ class SubprocessDrain:
         # No pair found — put back all consumed lines
         for line in all_lines:
             self._queue.put(line)
+        
         self._consecutive_failures += 1
+
         if self._consecutive_failures >= self._max_consecutive_failures:
             self.stop()
-        raise SentinelNotFound(f"no sentinel pair found — subprocess loop may have broken: \n  '{self._command}'")
+            raise SentinelNotFound(f"no sentinel pair found — subprocess loop may have broken: \n  '{self._command}'")
+        
+        if self._consecutive_failures >= 2:
+            print(f"[WARN] no sentinel pair found — failure {self._consecutive_failures} / {self._max_consecutive_failures}: \n  '{self._command}'")
+            
+        return []
 
     @property
     def alive(self) -> bool:
