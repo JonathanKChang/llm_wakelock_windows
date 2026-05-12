@@ -15,8 +15,11 @@ classDiagram
         -_thread Thread
         -_sentinel str
         -_full_command str
-        -_drain_timeout float
-        +__init__(command, interval, sentinel, max_queue_lines, drain_wait_multiplier)
+        -_interval float
+        -_max_consecutive_failures int
+        -_consecutive_failures int
+        -_stopped bool
+        +__init__(command, interval, sentinel, max_queue_lines, max_consecutive_failures)
         +start() subprocess.Popen | None
         +drain(timeout) list[str]
         +alive bool
