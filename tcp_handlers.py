@@ -41,6 +41,7 @@ class SubprocessDrain:
         self._max_consecutive_failures = max_consecutive_failures
         self._consecutive_failures = 0
         self._stopped = False
+        self._last_output: list[str] | None = None
         self._full_command = f"echo {sentinel}; while true; do {command} || break; echo {sentinel}; sleep {interval}; done"
 
     def start(self) -> subprocess.Popen | None:
@@ -94,6 +95,8 @@ class SubprocessDrain:
         Non-blocking by default (timeout=0). Drains all available lines,
         checks for the last sentinel pair, and returns lines between them.
         Raises SentinelNotFound after max_consecutive_failures misses.
+        When sentinel pair is not found (below threshold), returns the cached
+        output from the last successful drain, or [] if no prior output exists.
         """
         try:
             line = self._queue.get(timeout=timeout)
@@ -114,6 +117,7 @@ class SubprocessDrain:
             # Put back the second sentinel and any lines after it
             for line in all_lines[pair[1]:]:
                 self._queue.put(line)
+            self._last_output = result
             return result
 
         # No pair found - put back all consumed lines
@@ -128,8 +132,8 @@ class SubprocessDrain:
         
         elif self._consecutive_failures >= self._max_consecutive_failures / 2:
             print(f"[WARN] no sentinel pair found - failure {self._consecutive_failures} / {self._max_consecutive_failures}: \n  '{self._command}'")
-            
-        return []
+
+        return self._last_output if self._last_output is not None else []
 
     @property
     def alive(self) -> bool:
