@@ -326,7 +326,7 @@ class WslTcpHandler(WslTcpConnectionHandler):
         super().__init__(config, cmd)
 
         if self._stopped:
-            print("[WARN] WSL monitoring not working")
+            print("[WARN] WSL monitoring error")
         else:
             print("[INFO] WSL monitoring started")
 
@@ -350,6 +350,11 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         cmd = f"docker exec {short_id} sh -c 'cat /proc/net/tcp'"
         super().__init__(config, cmd)
         self._container_id = short_id
+
+        if self._stopped:
+            print(f"[WARN] WSL-Docker {short_id} monitoring error")
+        else:
+            print(f"[INFO] WSL-Docker {short_id} monitoring started")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from Docker container."""
@@ -379,14 +384,12 @@ class WslDockerManager(TcpConnectionSource):
             drain_wait_multiplier=config.get("drain_wait_multiplier", 1.0),
         )
         self._drain.start()
-        # Brief wait for drain thread to populate queue before first discover
-        #time.sleep(0.5)
         self._discover()
 
         if self._stopped:
-            print("[WARN] WSL-Docker monitoring not working")
+            print("[WARN] WSL-Docker lifecycle monitoring error")
         else:
-            print("[INFO] WSL-Docker monitoring started")
+            print("[INFO] WSL-Docker lifecycle monitoring started")
 
     def _discover(self) -> None:
         """Drain docker ps output, handle errors, then diff against _handlers."""
