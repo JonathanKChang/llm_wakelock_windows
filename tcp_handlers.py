@@ -40,6 +40,7 @@ class SubprocessDrain:
         self._interval = interval
         self._max_consecutive_failures = max_consecutive_failures
         self._consecutive_failures = 0
+        self._stopped = False
         self._full_command = f"echo {sentinel}; while true; do {command} || break; echo {sentinel}; sleep {interval}; done"
 
     def start(self) -> subprocess.Popen | None:
@@ -115,7 +116,9 @@ class SubprocessDrain:
                 self._queue.put(line)
             return result
 
-        # No pair found
+        # No pair found — put back all consumed lines
+        for line in all_lines:
+            self._queue.put(line)
         self._consecutive_failures += 1
         if self._consecutive_failures >= self._max_consecutive_failures:
             self.stop()
@@ -128,6 +131,7 @@ class SubprocessDrain:
 
     def stop(self) -> None:
         """Terminate the subprocess and wait for the drain thread."""
+        self._stopped = True
         if self._process is not None:
             try:
                 self._process.terminate()

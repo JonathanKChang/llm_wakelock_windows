@@ -37,8 +37,10 @@ def _monitor():
         "remote_ssh_ports": [22],
         "ssh_min_duration": 30.0,
         "polling_interval": 5.0,
+        "max_consecutive_failures": 3,
         "wsl_monitoring": False,
         "wsl_docker_monitoring_max": 0,
+        "debug": False,
     })
 
 
@@ -218,7 +220,7 @@ def test_docker_container_discovery_respects_max():
     with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
          patch("tcp_handlers.subprocess.run", return_value=mock_run), \
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
-        config = {"wsl_docker_monitoring_max": 2, "polling_interval": 5.0}
+        config = {"wsl_docker_monitoring_max": 2, "polling_interval": 5.0, "wsl_command_timeout": 10, "wsl_docker_discovery_interval": 60, "max_consecutive_failures": 3, "debug": False}
         manager = WslDockerManager(config)
         assert len(manager._handlers) == 2
         # Pre-filter: oldest kept, new discarded — abc123 and def456 retained
@@ -238,7 +240,7 @@ def test_docker_discovery_runs_on_timer():
     with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
          patch("tcp_handlers.subprocess.run", return_value=mock_run), \
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
-        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0, "wsl_docker_discovery_interval": 10}
+        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0, "wsl_command_timeout": 10, "wsl_docker_discovery_interval": 10, "max_consecutive_failures": 3}
         manager = WslDockerManager(config)
         initial_count = len(manager._handlers)
         # Rapid get_connections() calls don't trigger discovery (timer not expired)
@@ -258,7 +260,7 @@ def test_docker_handler_no_containers():
     with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
          patch("tcp_handlers.subprocess.run", return_value=mock_run), \
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
-        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0}
+        config = {"wsl_docker_monitoring_max": 5, "polling_interval": 5.0, "wsl_command_timeout": 10, "wsl_docker_discovery_interval": 60, "max_consecutive_failures": 3}
         manager = WslDockerManager(config)
         # Manually mock drain to return empty list (no containers)
         manager._drain.drain = MagicMock(return_value=[])
@@ -270,78 +272,85 @@ def test_docker_handler_no_containers():
 def test_drain_no_sentinel_raises():
     """Failure case: output without sentinel pair raises SentinelNotFound."""
     drain = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=1.0, max_queue_lines=100
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
     )
     drain._queue.put("some output without sentinel\n")
     with pytest.raises(tcp_handlers.SentinelNotFound):
-        drain.drain(timeout=0.1)
+        drain.drain()
 
 
 def test_drain_returns_lines_between_last_two_sentinels():
     """Happy path: drain returns lines between the last two sentinel occurrences."""
     drain = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=1.0, max_queue_lines=100
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
     )
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
     drain._queue.put("output line 1\n")
     drain._queue.put("output line 2\n")
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
-    result = drain.drain(timeout=0.1)
+    result = drain.drain()
     assert result == ["output line 1\n", "output line 2\n"]
 
 
 def test_drain_empty_between_sentinels():
     """Edge case: drain returns empty list when no output between two sentinels."""
     drain = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=1.0, max_queue_lines=100
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
     )
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
-    result = drain.drain(timeout=0.1)
+    result = drain.drain()
     assert result == []
 
 
 def test_drain_multiple_cycles_returns_last():
     """Edge case: drain returns only the last cycle's output when multiple cycles buffered."""
     drain = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=1.0, max_queue_lines=100
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
     )
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
     drain._queue.put("stale output\n")
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
     drain._queue.put("fresh output\n")
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
-    result = drain.drain(timeout=0.1)
+    result = drain.drain()
     assert result == ["fresh output\n"]
 
 
 def test_drain_partial_output_retained_in_queue():
-    """Edge case: partial output after last sentinel stays in queue for next drain() call."""
+    """Edge case: partial output between sentinels is captured on next drain() call."""
     drain = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=1.0, max_queue_lines=100
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
     )
     # Only one sentinel — no complete pair
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
     drain._queue.put("partial output\n")  # no second sentinel yet
-    # First drain: no complete pair, raises SentinelNotFound
+    # First drain: no complete pair, raises SentinelNotFound, puts lines back
     with pytest.raises(tcp_handlers.SentinelNotFound):
-        drain.drain(timeout=0.1)
-    # Partial output should be put back in queue
-    drain._queue.put("__SUBPROCESS_DRAIN__\n")  # now we have second sentinel
-    result = drain.drain(timeout=0.1)
+        drain.drain()
+    # Second sentinel arrives
+    drain._queue.put("__SUBPROCESS_DRAIN__\n")
+    result = drain.drain()
     assert result == ["partial output\n"]
 
 
-def test_drain_wait_multiplier_scales_timeout():
-    """Config: drain_wait_multiplier scales the drain timeout."""
+def test_max_consecutive_failures_stops_drain():
+    """Failure case: drain stops the subprocess after N consecutive sentinel-pair misses."""
     drain = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=1.0, max_queue_lines=100, drain_wait_multiplier=2.0
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=2
     )
-    assert drain._drain_timeout == 2.0
-    drain2 = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=5.0, max_queue_lines=100, drain_wait_multiplier=1.0
-    )
-    assert drain2._drain_timeout == 5.0
+    # First failure
+    drain._queue.put("no sentinel here\n")
+    with pytest.raises(tcp_handlers.SentinelNotFound):
+        drain.drain()
+    assert drain._consecutive_failures == 1
+    assert drain._stopped is False
+    # Second failure — should stop the drain
+    drain._queue.put("still no sentinel\n")
+    with pytest.raises(tcp_handlers.SentinelNotFound):
+        drain.drain()
+    assert drain._consecutive_failures == 2
+    assert drain._stopped is True
 
 
 def test_handler_empty_output_does_not_mark_unavailable():
@@ -352,7 +361,7 @@ def test_handler_empty_output_does_not_mark_unavailable():
     mock_proc.poll = MagicMock(return_value=None)
     with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
          patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
-        handler = WslTcpHandler({"polling_interval": 1.0, "wsl_monitoring": True, "wsl_command_timeout": 0.1})
+        handler = WslTcpHandler({"polling_interval": 1.0, "wsl_monitoring": True, "wsl_command_timeout": 0.1, "max_consecutive_failures": 3, "debug": False})
         handler.get_connections()
         assert handler._stopped is False  # empty output is normal, not an error
 
@@ -369,6 +378,7 @@ def test_tcp_connection_monitor_sleeps_remaining_time():
             "remote_ssh_ports": [],
             "ssh_min_duration": 30.0,
             "polling_interval": 5.0,
+            "max_consecutive_failures": 3,
             "grace_period_minutes": 30,
             "wsl_monitoring": False,
             "wsl_docker_monitoring_max": 0,
