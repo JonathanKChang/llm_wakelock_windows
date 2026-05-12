@@ -8,6 +8,7 @@ A generic Windows tool that keeps your system awake while TCP connections on con
 |---|---|
 | **v1** | Windows-only TCP port monitoring |
 | **v2** | Added basic WSL and WSL Docker monitoring (container discovery runs once at startup) |
+| **v3** | Added full WSL Docker lifecycle monitoring |
 
 ## Why Windows?
 
@@ -59,7 +60,7 @@ Copy `config.toml` from the script directory and uncomment the values you want t
 | `wsl_monitoring` | `false` | Monitor WSL2 TCP connections |
 | `wsl_docker_monitoring_max` | `0` | Max Docker containers to monitor (0 = disabled) |
 | `wsl_command_timeout` | `10` | Timeout for all WSL commands (seconds) |
-| `wsl_docker_discovery_interval` | `10` | Poll cycles between Docker container discovery scans |
+| `wsl_docker_discovery_interval` | `60` | Polling interval (seconds) for discovering Docker container changes |
 
 ### Adding a new service
 

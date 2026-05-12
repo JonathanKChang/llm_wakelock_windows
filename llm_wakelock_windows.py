@@ -36,11 +36,12 @@ DEFAULTS = {
     "remote_ssh_ports": [],
     "ssh_min_duration": 30.0,
     "polling_interval": 5.0,
+    "drain_wait_multiplier": 1.0,
     "grace_period_minutes": 30,
     "wsl_monitoring": False,
     "wsl_docker_monitoring_max": 0,
     "wsl_command_timeout": 10,
-    "wsl_docker_discovery_interval": 10,
+    "wsl_docker_discovery_interval": 60,
     "debug": False,
 }
 
@@ -175,7 +176,9 @@ class TcpConnectionMonitor:
         inactive_since: datetime.datetime | None = None
         wakelock = False
         grace_period_seconds = config['grace_period_minutes'] * 60
+        polling_interval = self._config["polling_interval"]
         while True:
+            loop_start = time.time()
             all_conns = self.get_all_connections()
             active = self.has_active_connections(all_conns, self._config)
             now = datetime.datetime.now()
@@ -204,7 +207,10 @@ class TcpConnectionMonitor:
                     wakelock = False
                     inactive_since = None
 
-            time.sleep(self._config["polling_interval"])
+            elapsed = time.time() - loop_start
+            remaining = polling_interval - elapsed
+            if remaining > 0:
+                time.sleep(remaining)
 
 
 # ── Configuration ──────────────────────────────────────────────────────────────

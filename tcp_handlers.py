@@ -23,20 +23,22 @@ class SentinelNotFound(Exception):
 class SubprocessDrain:
     """Persistent subprocess that runs a command in a loop, draining stdout into a queue.
 
-    Constructs the loop: `while true; do echo <sentinel>; <command>; sleep <interval>; done`
-    drain() always waits up to `timeout` for the first line, then drains the rest.
-    Returns only lines after the most recent sentinel, discarding stale data.
+    Constructs the loop: `echo <sentinel>; while true; do <command> || break; echo <sentinel>; sleep <interval>; done`
+    drain() uses queue.get(timeout=remaining) to block-wait for new lines, scans for the last
+    two sentinel occurrences, and returns lines between them.
     """
 
     def __init__(self, command: str, interval: float = 5.0, sentinel: str = "__SUBPROCESS_DRAIN__",
-                 max_queue_lines: int = 1000, timeout: float = 10.0) -> None:
+                 max_queue_lines: int = 1000, timeout: float = 10.0,
+                 drain_wait_multiplier: float = 1.0) -> None:
         self._process: subprocess.Popen | None = None
         self._queue: queue.Queue[str] = queue.Queue(maxsize=max_queue_lines)
         self._thread: threading.Thread | None = None
         self._sentinel = sentinel
         self._command = command
-        self._timeout = timeout
-        self._full_command = f"while true; do echo {sentinel}; {command} || break; sleep {interval}; done"
+        self._stop_timeout = timeout
+        self._drain_timeout = interval * drain_wait_multiplier
+        self._full_command = f"echo {sentinel}; while true; do {command} || break; echo {sentinel}; sleep {interval}; done"
 
     def start(self) -> subprocess.Popen | None:
         """Spawn the persistent subprocess and start the drain thread."""
@@ -65,30 +67,62 @@ class SubprocessDrain:
         except Exception:
             pass
 
-    def drain(self, timeout: float = 5.0) -> list[str]:
-        """Drain lines since the most recent sentinel.
+    @staticmethod
+    def _find_last_sentinel_pair(lines: list[str], sentinel: str) -> tuple[int, int] | None:
+        """Scan lines for the last two sentinel occurrences.
 
-        Always waits up to `timeout` for the first line, then drains the rest.
-        Raises SentinelNotFound if output contains no sentinel.
+        Returns (first_idx, second_idx) or None if fewer than 2 sentinels found.
         """
-        lines: list[str] = []
-        try:
-            lines.append(self._queue.get(timeout=timeout))
-        except queue.Empty:
-            return []
-        while not self._queue.empty():
-            try:
-                lines.append(self._queue.get_nowait())
-            except queue.Empty:
-                break
-        # Find last sentinel; return only lines after it
-        last_idx = None
+        hits: list[int] = []
+
         for i, line in enumerate(lines):
-            if self._sentinel in line:
-                last_idx = i
-        if last_idx is None:
-            raise SentinelNotFound(f"no sentinel found in drain output - subprocess loop may have broken: \n  '{self._command}'")
-        return lines[last_idx + 1:]
+            if sentinel in line:
+                hits.append(i)
+
+        if len(hits) < 2:
+            return None
+
+        return hits[-2], hits[-1]
+
+    def drain(self, timeout: float | None = None) -> list[str]:
+        """Drain lines between the last two sentinel occurrences.
+
+        Uses queue.get(timeout=remaining) to block-wait for new lines (no busy-polling).
+        Returns lines between the last two sentinels, or raises SentinelNotFound
+        if fewer than two sentinels appear within the timeout.
+        """
+        if timeout is None:
+            timeout = self._drain_timeout
+        start = time.time()
+        all_lines: list[str] = []
+        while time.time() - start < timeout:
+            remaining = timeout - (time.time() - start)
+            if remaining <= 0:
+                break
+            try:
+                line = self._queue.get(timeout=remaining)
+                all_lines.append(line)
+                # Drain all available lines immediately
+                while not self._queue.empty():
+                    try:
+                        all_lines.append(self._queue.get_nowait())
+                    except queue.Empty:
+                        break
+            except queue.Empty:
+                break  # overall timeout reached
+
+            pair = self._find_last_sentinel_pair(all_lines, self._sentinel)
+            if pair is not None:
+                result = all_lines[pair[0] + 1:pair[1]]
+                leftover = all_lines[pair[1] + 1:]
+                for line in leftover:
+                    self._queue.put(line)
+                return result
+
+        # No pair found — put all lines back
+        for line in all_lines:
+            self._queue.put(line)
+        raise SentinelNotFound(f"no sentinel pair found within {timeout}s - subprocess loop may have broken: \n  '{self._command}'")
 
     @property
     def alive(self) -> bool:
@@ -100,15 +134,15 @@ class SubprocessDrain:
         if self._process is not None:
             try:
                 self._process.terminate()
-                self._process.wait(timeout=self._timeout)
+                self._process.wait(timeout=self._stop_timeout)
             except (subprocess.TimeoutExpired, OSError, ValueError):
                 try:
                     self._process.kill()
-                    self._process.wait(timeout=self._timeout)
+                    self._process.wait(timeout=self._stop_timeout)
                 except (subprocess.TimeoutExpired, OSError, ValueError):
                     pass
         if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=self._timeout)
+            self._thread.join(timeout=self._stop_timeout)
 
 
 class TcpConnectionSource(Protocol):
@@ -204,6 +238,7 @@ class WslTcpConnectionHandler:
             command,
             interval=config["polling_interval"],
             timeout=config.get("wsl_command_timeout", 10),
+            drain_wait_multiplier=config.get("drain_wait_multiplier", 1.0),
         )
         self._debug = config.get("debug", False)
         self._timeout = config.get("wsl_command_timeout", 10)
@@ -264,7 +299,7 @@ class WslTcpConnectionHandler:
             lines = self._drain.drain(timeout=self._timeout)
         except SentinelNotFound:
             self._stopped = True
-            print(f"[WARN] no sentinel found - will not monitor: \n  '{self._drain._command}'")
+            print(f"[WARN] WSL - no sentinel found - will not monitor: \n  '{self._drain._command}'")
             return []
 
         if self._debug and lines:
@@ -287,9 +322,13 @@ class WslTcpHandler(WslTcpConnectionHandler):
     """Handles WSL TCP connection retrieval via /proc/net/tcp."""
 
     def __init__(self, config: dict) -> None:
-        cmd = f"cat /proc/net/tcp"
+        cmd = "cat /proc/net/tcp"
         super().__init__(config, cmd)
-        print("[INFO] WSL monitoring started")
+
+        if self._stopped:
+            print("[WARN] WSL monitoring not working")
+        else:
+            print("[INFO] WSL monitoring started")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from WSL /proc/net/tcp."""
@@ -337,10 +376,17 @@ class WslDockerManager(TcpConnectionSource):
             "docker ps --format '{{.ID}}'",
             interval=self._discovery_interval,
             timeout=self._timeout,
+            drain_wait_multiplier=config.get("drain_wait_multiplier", 1.0),
         )
         self._drain.start()
+        # Brief wait for drain thread to populate queue before first discover
+        #time.sleep(0.5)
         self._discover()
-        print("[INFO] Docker lifecycle monitoring started")
+
+        if self._stopped:
+            print("[WARN] WSL-Docker monitoring not working")
+        else:
+            print("[INFO] WSL-Docker monitoring started")
 
     def _discover(self) -> None:
         """Drain docker ps output, handle errors, then diff against _handlers."""
@@ -355,7 +401,7 @@ class WslDockerManager(TcpConnectionSource):
             lines = self._drain.drain(timeout=self._timeout)
         except SentinelNotFound:
             self._stopped = True
-            print(f"[WARN] no sentinel found in discovery - will not monitor: \n  '{self._drain._command}'")
+            print(f"[WARN] no sentinel found in docker discovery - will not monitor: \n  '{self._drain._command}'")
             return
         if not lines:
             return  # no output yet, skip discovery this cycle
