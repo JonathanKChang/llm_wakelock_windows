@@ -30,14 +30,16 @@ class SubprocessDrain:
 
     def __init__(self, command: str, interval: float = 5.0, sentinel: str = "__SUBPROCESS_DRAIN__",
                  max_queue_lines: int = 1000, timeout: float = 10.0,
-                 drain_wait_multiplier: float = 1.0) -> None:
+                 max_consecutive_failures: int = 3) -> None:
         self._process: subprocess.Popen | None = None
         self._queue: queue.Queue[str] = queue.Queue(maxsize=max_queue_lines)
         self._thread: threading.Thread | None = None
         self._sentinel = sentinel
         self._command = command
         self._stop_timeout = timeout
-        self._drain_timeout = interval * drain_wait_multiplier
+        self._interval = interval
+        self._max_consecutive_failures = max_consecutive_failures
+        self._consecutive_failures = 0
         self._full_command = f"echo {sentinel}; while true; do {command} || break; echo {sentinel}; sleep {interval}; done"
 
     def start(self) -> subprocess.Popen | None:
@@ -54,6 +56,7 @@ class SubprocessDrain:
                 target=self._drain_loop, args=(proc, self._queue), daemon=True
             )
             self._thread.start()
+            time.sleep(0.5)  # let subprocess produce initial sentinel pair
             return proc
         except (FileNotFoundError, OSError):
             return None
@@ -84,45 +87,39 @@ class SubprocessDrain:
 
         return hits[-2], hits[-1]
 
-    def drain(self, timeout: float | None = None) -> list[str]:
+    def drain(self, timeout: float = 0) -> list[str]:
         """Drain lines between the last two sentinel occurrences.
 
-        Uses queue.get(timeout=remaining) to block-wait for new lines (no busy-polling).
-        Returns lines between the last two sentinels, or raises SentinelNotFound
-        if fewer than two sentinels appear within the timeout.
+        Non-blocking by default (timeout=0). Drains all available lines,
+        checks for the last sentinel pair, and returns lines between them.
+        Raises SentinelNotFound after max_consecutive_failures misses.
         """
-        if timeout is None:
-            timeout = self._drain_timeout
-        start = time.time()
-        all_lines: list[str] = []
-        while time.time() - start < timeout:
-            remaining = timeout - (time.time() - start)
-            if remaining <= 0:
-                break
+        try:
+            line = self._queue.get(timeout=timeout)
+            all_lines = [line]
+        except queue.Empty:
+            all_lines = []
+        # Drain all remaining available lines
+        while True:
             try:
-                line = self._queue.get(timeout=remaining)
-                all_lines.append(line)
-                # Drain all available lines immediately
-                while not self._queue.empty():
-                    try:
-                        all_lines.append(self._queue.get_nowait())
-                    except queue.Empty:
-                        break
+                all_lines.append(self._queue.get_nowait())
             except queue.Empty:
-                break  # overall timeout reached
+                break
 
-            pair = self._find_last_sentinel_pair(all_lines, self._sentinel)
-            if pair is not None:
-                result = all_lines[pair[0] + 1:pair[1]]
-                leftover = all_lines[pair[1] + 1:]
-                for line in leftover:
-                    self._queue.put(line)
-                return result
+        pair = self._find_last_sentinel_pair(all_lines, self._sentinel)
+        if pair is not None:
+            self._consecutive_failures = 0
+            result = all_lines[pair[0] + 1:pair[1]]
+            # Put back the second sentinel and any lines after it
+            for line in all_lines[pair[1]:]:
+                self._queue.put(line)
+            return result
 
-        # No pair found — put all lines back
-        for line in all_lines:
-            self._queue.put(line)
-        raise SentinelNotFound(f"no sentinel pair found within {timeout}s - subprocess loop may have broken: \n  '{self._command}'")
+        # No pair found
+        self._consecutive_failures += 1
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            self.stop()
+        raise SentinelNotFound(f"no sentinel pair found — subprocess loop may have broken: \n  '{self._command}'")
 
     @property
     def alive(self) -> bool:
