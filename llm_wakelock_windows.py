@@ -36,12 +36,12 @@ DEFAULTS = {
     "remote_ssh_ports": [],
     "ssh_min_duration": 30.0,
     "polling_interval": 5.0,
-    "max_consecutive_failures": 3,
     "grace_period_minutes": 30,
     "wsl_monitoring": False,
     "wsl_docker_monitoring_max": 0,
-    "wsl_command_timeout": 10,
     "wsl_docker_discovery_interval": 60,
+    "wsl_command_timeout": 10,
+    "max_consecutive_failures": 10,
     "debug": False,
 }
 
@@ -211,7 +211,7 @@ class TcpConnectionMonitor:
             remaining = polling_interval - elapsed
             if remaining > 0:
                 time.sleep(remaining)
-
+                
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 

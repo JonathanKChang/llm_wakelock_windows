@@ -14,7 +14,7 @@ A generic Windows tool that keeps your system awake while TCP connections on con
 
 I can't be the only one who's repurposed a gaming Windows PC to serve LLMs, since they sit idle when not gaming. But when you're not in a late night vibe-coding session, you might want to save some energy. Manually waking and sleeping machines is a chore, while on the other end Windows / WSL doesn't grab a wakelock for active incoming ssh connections or even high computation LLM inference. 
 
-This was developed in a way that should make it easy to adapt to Linux if desired
+Designed in a way that is easy to extend to Linux and MacOS
 
 ## What it does
 
@@ -45,9 +45,9 @@ The `ssh_min_duration` threshold (default: 30 seconds) prevents short-lived SSH 
 
 ## Configuration
 
-Copy `config.toml` from the script directory and uncomment the values you want to override. The file is optional — if it doesn't exist, all built-in defaults are used.
+Edit `config.toml` in the script directory and uncomment the values you want to override. The file is optional — if it doesn't exist, all built-in defaults are used.
 
-### Built-in defaults
+### Main Settings
 
 | Setting | Default | Description |
 |---|---|---|
@@ -57,9 +57,9 @@ Copy `config.toml` from the script directory and uncomment the values you want t
 | `remote_ssh_ports` | `[]` | Remote SSH ports |
 | `ssh_min_duration` | `30.0` | Min SSH session duration (seconds) |
 | `polling_interval` | `5.0` | Polling interval (seconds) |
+| `grace_period_minutes` | `5.0` | How long to extend wakelock after last active connection |
 | `wsl_monitoring` | `false` | Monitor WSL2 TCP connections |
 | `wsl_docker_monitoring_max` | `0` | Max Docker containers to monitor (0 = disabled) |
-| `wsl_command_timeout` | `10` | Timeout for all WSL commands (seconds) |
 | `wsl_docker_discovery_interval` | `60` | Polling interval (seconds) for discovering Docker container changes |
 
 ### Adding a new service

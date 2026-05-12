@@ -57,7 +57,7 @@ class SubprocessDrain:
                 target=self._drain_loop, args=(proc, self._queue), daemon=True
             )
             self._thread.start()
-            time.sleep(0.5)  # let subprocess produce initial sentinel pair
+            time.sleep(0.5)  # let subprocess produce initial output
             return proc
         except (FileNotFoundError, OSError):
             return None
@@ -116,7 +116,7 @@ class SubprocessDrain:
                 self._queue.put(line)
             return result
 
-        # No pair found — put back all consumed lines
+        # No pair found - put back all consumed lines
         for line in all_lines:
             self._queue.put(line)
         
@@ -124,10 +124,10 @@ class SubprocessDrain:
 
         if self._consecutive_failures >= self._max_consecutive_failures:
             self.stop()
-            raise SentinelNotFound(f"no sentinel pair found — subprocess loop may have broken: \n  '{self._command}'")
+            raise SentinelNotFound(f"no sentinel pair found - subprocess loop may have broken: \n  '{self._command}'")
         
-        if self._consecutive_failures >= 2:
-            print(f"[WARN] no sentinel pair found — failure {self._consecutive_failures} / {self._max_consecutive_failures}: \n  '{self._command}'")
+        elif self._consecutive_failures >= self._max_consecutive_failures / 2:
+            print(f"[WARN] no sentinel pair found - failure {self._consecutive_failures} / {self._max_consecutive_failures}: \n  '{self._command}'")
             
         return []
 
@@ -412,18 +412,22 @@ class WslDockerManager(TcpConnectionSource):
             self._stopped = True
             print(f"[WARN] no sentinel found in docker discovery - will not monitor: \n  '{self._drain._command}'")
             return
+        
         if not lines:
             self._last_discovery_time = time.time()
             return  # no output yet, skip discovery this cycle
+        
         max_containers = self._config["wsl_docker_monitoring_max"]
         if max_containers < 1:
             return
+        
         current_ids = [line.strip() for line in lines if line.strip()]
         # Remove stopped containers
         for cid in list(self._handlers):
             if cid not in current_ids:
                 self._handlers[cid].cleanup()
                 del self._handlers[cid]
+
         # Add new containers (up to remaining cap)
         remaining = max_containers - len(self._handlers)
         for cid in current_ids:

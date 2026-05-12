@@ -21,13 +21,6 @@
 # How often to poll the TCP table (seconds).
 # polling_interval = 5.0
 
-# Number of consecutive drain calls that fail to find a sentinel pair
-# before the WSL/Docker subprocess monitor stops itself.
-# Tuning: set higher if polling_interval is much shorter than subprocess
-# output cadence (e.g., subprocess runs every 10s but polling is every 2s).
-# Default: 3
-# max_consecutive_failures = 3
-
 # Extend the wakelock for this many minutes after the last monitored connection.
 # grace_period_minutes = 30
 
@@ -39,6 +32,17 @@
 # Containers are auto-discovered via docker ps at startup.
 # New containers started after the daemon begins are NOT picked up.
 # wsl_docker_monitoring_max = 0
+
+# Number of seconds to wait for WSL.exe commands
+# WSL.exe interface can be unresponsive on light load
+# Even when the container is responsive to existing processes
+# wsl_command_timeout = 10
+
+# Number of allowed consecutive polls without output from
+# the WSL/Docker tcp subprocess monitor.
+# If the system is under high load or WSL is resource constrained,
+# periods of delayed output are expected
+# max_consecutive_failures = 10
 
 # Enable debug-level logging (prints all connections each poll).
 # debug = false

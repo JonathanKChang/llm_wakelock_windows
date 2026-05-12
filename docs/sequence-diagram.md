@@ -20,18 +20,18 @@ sequenceDiagram
 
     alt wsl_monitoring enabled
         TC->>WSH: WslTcpHandler(config)
-        WSH->>DD: SubprocessDrain(command, sentinel="/proc/net/tcp")
-        Note over WSH,DD: persistent loop: echo /proc/net/tcp#59; while true#59; do cat /proc/net/tcp#59; echo /proc/net/tcp#59; sleep N#59; done
+        WSH->>DD: SubprocessDrain(command)
+        Note over WSH,DD: persistent loop: while true#59; do cat /proc/net/tcp#59; echo /proc/net/tcp#59; sleep N#59; done
     end
 
     alt wsl_docker_monitoring_max >= 1
         TC->>WD: WslDockerManager(config)
-        WD->>DD: SubprocessDrain("docker ps --format...", sentinel="DISCOVERY")
-        Note over WD,DD: persistent loop: echo DISCOVERY#59; while true#59; do docker ps#59; echo DISCOVERY#59; sleep N#59; done
+        WD->>DD: SubprocessDrain("docker ps --format...",)
+        Note over WD,DD: persistent loop: while true#59; do docker ps#59; echo sleep N#59; done
         WD->>DD: start()
-        DD->>OS: wsl.exe -e sh -c "echo DISCOVERY#59; while true#59; do docker ps#59; echo DISCOVERY#59; sleep N#59; done"
+        DD->>OS: wsl.exe -e sh -c "while true#59; do docker ps#59; sleep N#59; done"
         loop discovery interval
-            DD->>DD: drain() — returns lines after last DISCOVERY sentinel
+            DD->>DD: drain() — returns lines between last 2 SENTINEL
             DD-->>WD: container ID + name lines
             WD->>WD: diff handlers, add new / remove stopped
         end
@@ -47,7 +47,7 @@ sequenceDiagram
             TC->>WSH: get_connections()
             WSH->>DD: drain()
             DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
-            DD->>DD: scan last 2 sentinels, return lines between them
+            DD->>DD: scan last 2 SENTINEL, return lines between them
             DD-->>WSH: tcp lines
             WSH->>WSH: parse each line
             WSH-->>TC: connections
@@ -89,14 +89,14 @@ sequenceDiagram
     participant WD as WslDockerManager
     participant OS as WSL / Docker
 
-    Note over DD: Persistent loop: echo DISCOVERY#59; while true#59; do docker ps#59; echo DISCOVERY#59; sleep N#59; done
-    DD->>OS: wsl.exe -e sh -c "echo DISCOVERY#59; while true#59; do docker ps --format '{{.ID}}\\t{{.Names}}'#59; echo DISCOVERY#59; sleep N#59; done"
-    OS-->>DD: stdout: DISCOVERY /n container lines /n DISCOVERY /n container lines /n ...
+    Note over DD: Persistent loop: while true#59; do docker ps#59; sleep N#59; done
+    DD->>OS: wsl.exe -e sh -c "while true#59; do docker ps --format '{{.ID}}'#59; sleep N#59; done"
+    OS-->>DD: stdout: container line/n container lines /n ...
 
     loop each polling cycle
         WD->>DD: drain()
         DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
-        DD->>DD: scan last 2 DISCOVERY sentinels, return lines between them
+        DD->>DD: scan last 2 SENTINEL, return lines between them
         DD-->>WD: ["abc123\tcontainer1", "def456\tcontainer2", ...]
         WD->>WD: diff current_ids vs _handlers keys
         alt new container
@@ -122,7 +122,7 @@ sequenceDiagram
     participant P as subprocess
     participant OS as WSL
 
-    H->>DD: SubprocessDrain(command, sentinel="/proc/net/tcp")
+    H->>DD: SubprocessDrain(command)
     Note over DD: _full_command = "echo /proc/net/tcp#59; while true#59; do cat /proc/net/tcp#59; echo /proc/net/tcp#59; sleep N#59; done"
 
     H->>DD: start()
@@ -136,7 +136,7 @@ sequenceDiagram
     loop polling_interval
         H->>DD: drain()
         DD->>Q: queue.get(timeout=remaining) — block-wait for new lines
-        DD->>DD: scan last 2 "/proc/net/tcp" sentinels, return lines between them
+        DD->>DD: scan last 2 SENTINEL, return lines between them
         DD-->>H: tcp lines
         H->>H: parse each line
     end
