@@ -36,7 +36,7 @@ DEFAULTS = {
     "remote_ssh_ports": [],
     "ssh_min_duration": 30.0,
     "polling_interval": 5.0,
-    "drain_wait_multiplier": 1.0,
+    "max_consecutive_failures": 3,
     "grace_period_minutes": 30,
     "wsl_monitoring": False,
     "wsl_docker_monitoring_max": 0,
