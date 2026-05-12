@@ -64,12 +64,12 @@ class TcpConnectionMonitor:
 
     def __init__(self, config: dict) -> None:
         self._config = config
-        self._debug = config.get("debug", False)
+        self._debug = config["debug"]
 
         self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
         if config["wsl_monitoring"]:
             self._handlers.append(WslTcpHandler(config))
-        if config.get("wsl_docker_monitoring_max", 0) >= 1:
+        if config["wsl_docker_monitoring_max"] >= 1:
             self._handlers.append(WslDockerManager(config))
         self._ssh_start_times: dict = {}
 
