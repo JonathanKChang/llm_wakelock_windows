@@ -156,7 +156,7 @@ class TcpConnectionSource(Protocol):
 # ── Handlers ───────────────────────────────────────────────────────────────────
 
 
-class WindowsTcpHandler:
+class WindowsTcpHandler(TcpConnectionSource):
     """Handles Windows TCP connection retrieval via iphlpapi."""
 
     AF_INET = 2
@@ -220,7 +220,7 @@ class WindowsTcpHandler:
         return connections
 
 
-class WslTcpConnectionHandler:
+class WslTcpConnectionHandler(TcpConnectionSource):
     """Base class for WSL TCP connection retrieval via persistent subprocess."""
 
     ESTABLISHED = 0x01
