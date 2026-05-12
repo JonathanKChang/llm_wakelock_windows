@@ -235,7 +235,6 @@ class WslTcpConnectionHandler(TcpConnectionSource):
             command,
             interval=config["polling_interval"],
             timeout=config["wsl_command_timeout"],
-            drain_wait_multiplier=config["drain_wait_multiplier"],
         )
         self._debug = config["debug"]
         self._timeout = config["wsl_command_timeout"]
@@ -293,7 +292,7 @@ class WslTcpConnectionHandler(TcpConnectionSource):
             return []
 
         try:
-            lines = self._drain.drain(timeout=self._timeout)
+            lines = self._drain.drain()
         except SentinelNotFound:
             self._stopped = True
             print(f"[WARN] WSL - no sentinel found - will not monitor: \n  '{self._drain._command}'")
@@ -378,7 +377,6 @@ class WslDockerManager(TcpConnectionSource):
             "docker ps --format '{{.ID}}'",
             interval=self._discovery_interval,
             timeout=self._timeout,
-            drain_wait_multiplier=config["drain_wait_multiplier"],
         )
         self._drain.start()
         self._discover()
@@ -398,7 +396,7 @@ class WslDockerManager(TcpConnectionSource):
             return
 
         try:
-            lines = self._drain.drain(timeout=self._timeout)
+            lines = self._drain.drain()
         except SentinelNotFound:
             self._stopped = True
             print(f"[WARN] no sentinel found in docker discovery - will not monitor: \n  '{self._drain._command}'")
