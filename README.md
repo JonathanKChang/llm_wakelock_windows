@@ -89,7 +89,7 @@ Monitor Docker containers running inside WSL by setting `wsl_docker_monitoring_m
 wsl_docker_monitoring_max = 5  # monitor up to 5 containers
 ```
 
-> **Note:** Container discovery runs every `wsl_docker_discovery_interval` poll cycles (default: every ~50s at 5s polling). New containers are picked up automatically.
+> **Note:** Container discovery runs every `wsl_docker_discovery_interval` seconds. New containers are picked up automatically.
 
 > **Note:** Connections are labeled `[docker:<container_id>]` in the output.
 
@@ -98,10 +98,11 @@ wsl_docker_monitoring_max = 5  # monitor up to 5 containers
 
 | File | Purpose |
 |---|---|
-| `llm_wakelock_windows.py` | Main daemon — run on Windows |
-| `dump_iphlpapi.py` | Utility: dumps raw TCP table to a binary file for analysis |
-| `wsl_tcp_monitor.sh` | WSL helper: reads `/proc/net/tcp` |
-| `tests/test_wakelock.py` | Tests: parses a TCP table blob (skips if missing) + SSH tracking logic (pure Python, runs on any platform) |
+| `llm_wakelock_windows.py` | Main daemon — run on Windows (config loading, main loop, wakelock management) |
+| `tcp_handlers.py` | TCP connection handlers (Windows iphlpapi, WSL, Docker-in-WSL) |
+| `config.toml` | Configuration file — copy and uncomment values to override defaults |
+| `tests/test_wakelock.py` | Core tests: SSH tracking, port matching (pure Python, runs on any platform) |
+| `docs/` | Mermaid diagrams for classes, components, and execution flow sequence |
 
 ## Requirements
 
@@ -115,18 +116,3 @@ python llm_wakelock_windows.py
 ```
 
 The script runs indefinitely. It prints the current time and relevant connection details whenever a wakelock is acquired.
-
-## Testing
-
-Run tests with pytest (install first if needed):
-
-```bash
-pip install pytest
-python -m pytest tests/test_wakelock.py -v
-```
-
-Or run directly (tests that require Windows will be skipped):
-
-```bash
-python tests/test_wakelock.py
-```

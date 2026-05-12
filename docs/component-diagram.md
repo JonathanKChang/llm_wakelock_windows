@@ -17,9 +17,9 @@ graph TB
 
         subgraph SubprocessDrain["SubprocessDrain (Shared)"]
             direction LR
-            DrainLoop["<b>drain loop</b><br/>while true; do<br/>  echo SENTINEL;<br/>  &lt;command&gt;;<br/>  sleep N; done"]:::drain
+            DrainLoop["<b>drain loop</b><br/>echo SENTINEL<br/>while true; do<br/>  &lt;command&gt;;<br/>  echo SENTINEL;<br/>  sleep N; done"]:::drain
             DrainQueue["<b>Queue</b><br/>Bounded (max 1000 lines)<br/>Daemon reader thread"]:::drain
-            DrainLogic["<b>drain()</b><br/>Returns lines since<br/>last sentinel only"]:::drain
+            DrainLogic["<b>drain()</b><br/>queue.get(timeout=remaining)<br/>Scans last 2 sentinels<br/>Returns lines between them"]:::drain
         end
 
         subgraph Wakelock["Wakelock Engine"]
@@ -106,7 +106,7 @@ graph TB
 | **WslTcpHandler** | Handler | Reads WSL `/proc/net/tcp` via `SubprocessDrain` (persistent subprocess + queue + sentinel drain) |
 | **WslDockerManager** | Handler | Persistent discovery subprocess with sentinel-based iteration; dict-based handler tracking |
 | **WslDockerTcpHandler** | Handler | Reads a single container's `/proc/net/tcp` via `docker exec` + `SubprocessDrain` |
-| **SubprocessDrain** | Shared | Persistent subprocess lifecycle, bounded queue, daemon reader thread, sentinel-based iteration |
+| **SubprocessDrain** | Shared | Persistent subprocess lifecycle, bounded queue, daemon reader thread, sentinel-based drain (queue.get with timeout, last-pair scanning) |
 | **Wakelock Engine** | OS Interface | Acquires/releases Windows wake lock via `kernel32.SetThreadExecutionState` |
 | **dump_iphlpapi.py** | Utility | Dumps raw TCP table buffer for binary analysis |
 | **wsl_tcp_monitor.sh** | Utility | WSL helper script for `/proc/net/tcp` monitoring |

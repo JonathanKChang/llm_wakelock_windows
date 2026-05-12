@@ -13,11 +13,12 @@ classDiagram
         -_process subprocess.Popen
         -_queue Queue[str]
         -_thread Thread
-        -_sentinel str | None
+        -_sentinel str
         -_full_command str
-        +__init__(command, interval, sentinel, max_queue_lines)
+        -_drain_timeout float
+        +__init__(command, interval, sentinel, max_queue_lines, drain_wait_multiplier)
         +start() subprocess.Popen | None
-        +drain() list[str]
+        +drain(timeout) list[str]
         +alive bool
         +stop() None
     }

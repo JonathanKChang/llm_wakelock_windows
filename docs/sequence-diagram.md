@@ -21,15 +21,15 @@ sequenceDiagram
     alt wsl_monitoring enabled
         TC->>WSH: WslTcpHandler(config)
         WSH->>DD: SubprocessDrain(command, sentinel="/proc/net/tcp")
-        Note over WSH,DD: persistent loop: echo /proc/net/tcp#59; cat /proc/net/tcp#59; sleep N
+        Note over WSH,DD: persistent loop: echo /proc/net/tcp#59; while true#59; do cat /proc/net/tcp#59; echo /proc/net/tcp#59; sleep N#59; done
     end
 
     alt wsl_docker_monitoring_max >= 1
         TC->>WD: WslDockerManager(config)
         WD->>DD: SubprocessDrain("docker ps --format...", sentinel="DISCOVERY")
-        Note over WD,DD: persistent loop: echo DISCOVERY#59; docker ps#59; sleep interval
+        Note over WD,DD: persistent loop: echo DISCOVERY#59; while true#59; do docker ps#59; echo DISCOVERY#59; sleep N#59; done
         WD->>DD: start()
-        DD->>OS: wsl.exe -e sh -c "while true#59; do echo DISCOVERY#59; docker ps#59; sleep N#59; done"
+        DD->>OS: wsl.exe -e sh -c "echo DISCOVERY#59; while true#59; do docker ps#59; echo DISCOVERY#59; sleep N#59; done"
         loop discovery interval
             DD->>DD: drain() — returns lines after last DISCOVERY sentinel
             DD-->>WD: container ID + name lines
@@ -45,7 +45,9 @@ sequenceDiagram
 
         alt WSL enabled
             TC->>WSH: get_connections()
-            WSH->>DD: drain() — returns lines after /proc/net/tcp header
+            WSH->>DD: drain()
+            DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
+            DD->>DD: scan last 2 sentinels, return lines between them
             DD-->>WSH: tcp lines
             WSH->>WSH: parse each line
             WSH-->>TC: connections
@@ -55,7 +57,9 @@ sequenceDiagram
             TC->>WD: get_connections()
             loop each handler in _handlers dict
                 WD->>WDC: get_connections()
-                WDC->>DD: drain() — returns lines after header
+                WDC->>DD: drain()
+                DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
+                DD->>DD: scan last 2 sentinels, return lines between them
                 DD-->>WDC: tcp lines
                 WDC->>WDC: parse, filter ESTABLISHED
                 WDC-->>WD: container connections
@@ -85,14 +89,14 @@ sequenceDiagram
     participant WD as WslDockerManager
     participant OS as WSL / Docker
 
-    Note over DD: Persistent loop: echo DISCOVERY#59; docker ps#59; sleep N
-    DD->>OS: wsl.exe -e sh -c "while true#59; do echo DISCOVERY#59; docker ps --format '{{.ID}}\\t{{.Names}}'#59; sleep N#59; done"
+    Note over DD: Persistent loop: echo DISCOVERY#59; while true#59; do docker ps#59; echo DISCOVERY#59; sleep N#59; done
+    DD->>OS: wsl.exe -e sh -c "echo DISCOVERY#59; while true#59; do docker ps --format '{{.ID}}\\t{{.Names}}'#59; echo DISCOVERY#59; sleep N#59; done"
     OS-->>DD: stdout: DISCOVERY /n container lines /n DISCOVERY /n container lines /n ...
 
     loop each polling cycle
         WD->>DD: drain()
-        DD->>DD: find last DISCOVERY sentinel
-        DD->>DD: return lines after sentinel only
+        DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
+        DD->>DD: scan last 2 DISCOVERY sentinels, return lines between them
         DD-->>WD: ["abc123\tcontainer1", "def456\tcontainer2", ...]
         WD->>WD: diff current_ids vs _handlers keys
         alt new container
@@ -119,7 +123,7 @@ sequenceDiagram
     participant OS as WSL
 
     H->>DD: SubprocessDrain(command, sentinel="/proc/net/tcp")
-    Note over DD: _full_command = "while true#59; do echo /proc/net/tcp#59; cat /proc/net/tcp#59; sleep N#59; done"
+    Note over DD: _full_command = "echo /proc/net/tcp#59; while true#59; do cat /proc/net/tcp#59; echo /proc/net/tcp#59; sleep N#59; done"
 
     H->>DD: start()
     DD->>P: wsl.exe -e sh -c "<_full_command>"
@@ -131,10 +135,10 @@ sequenceDiagram
 
     loop polling_interval
         H->>DD: drain()
-        DD->>Q: get_nowait all available lines
-        DD->>DD: find last "/proc/net/tcp" sentinel
-        DD-->>H: lines after sentinel only
-        H->>H: parse each line (skip header line)
+        DD->>Q: queue.get(timeout=remaining) — block-wait for new lines
+        DD->>DD: scan last 2 "/proc/net/tcp" sentinels, return lines between them
+        DD-->>H: tcp lines
+        H->>H: parse each line
     end
 
     H->>DD: stop()
