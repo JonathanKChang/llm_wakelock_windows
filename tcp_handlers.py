@@ -413,6 +413,7 @@ class WslDockerManager(TcpConnectionSource):
             print(f"[WARN] no sentinel found in docker discovery - will not monitor: \n  '{self._drain._command}'")
             return
         if not lines:
+            self._last_discovery_time = time.time()
             return  # no output yet, skip discovery this cycle
         max_containers = self._config["wsl_docker_monitoring_max"]
         if max_containers < 1:
