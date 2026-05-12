@@ -250,6 +250,7 @@ class WslTcpConnectionHandler(TcpConnectionSource):
             command,
             interval=config["polling_interval"],
             timeout=config["wsl_command_timeout"],
+            max_consecutive_failures=config["max_consecutive_failures"]
         )
         self._debug = config["debug"]
         self._timeout = config["wsl_command_timeout"]
@@ -391,7 +392,8 @@ class WslDockerManager(TcpConnectionSource):
         self._drain = SubprocessDrain(
             "docker ps --format '{{.ID}}'",
             interval=self._discovery_interval,
-            timeout=self._timeout,
+            timeout=config["wsl_command_timeout"],
+            max_consecutive_failures=config["max_consecutive_failures"]
         )
         self._drain.start()
         self._discover()
