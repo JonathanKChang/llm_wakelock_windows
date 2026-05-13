@@ -298,13 +298,18 @@ class WslTcpConnectionHandler(TcpConnectionSource):
         """Return True only for ESTABLISHED."""
         return state_hex == WslTcpConnectionHandler.ESTABLISHED
 
+    def _on_drain_dead(self) -> None:
+        """Called when the subprocess dies. Override to suppress or customize warnings."""
+        print("[WARN] wsl.exe not available - WSL connections will not be monitored")
+
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from the subprocess."""
         if self._stopped:
             return []
+        
         if not self._drain.alive:
             self._stopped = True
-            print("[WARN] wsl.exe not available - WSL connections will not be monitored")
+            self._on_drain_dead()
             return []
 
         try:
@@ -368,6 +373,10 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         else:
             print(f"[INFO] WSL-Docker {short_id} monitoring started")
 
+    def _on_drain_dead(self) -> None:
+        """Container exit is expected — no warning needed."""
+        pass
+
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from Docker container."""
         if self._stopped:
@@ -376,6 +385,7 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
         for c in conns:
             c["source"] = ConnectionSource.WSL_DOCKER
             c["container_id"] = self._container_id
+            
         return conns
 
 
