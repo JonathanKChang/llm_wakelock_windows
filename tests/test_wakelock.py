@@ -270,9 +270,9 @@ def test_docker_handler_no_containers():
 
 
 def test_drain_no_sentinel_raises():
-    """Failure case: output without sentinel pair raises SentinelNotFound."""
+    """Failure case: output without sentinel pair raises SentinelNotFound when threshold reached."""
     drain = tcp_handlers.SubprocessDrain(
-        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=1
     )
     drain._queue.put("some output without sentinel\n")
     with pytest.raises(tcp_handlers.SentinelNotFound):
@@ -303,6 +303,18 @@ def test_drain_empty_between_sentinels():
     assert result == []
 
 
+def test_handler_empty_output_does_not_mark_unavailable():
+    """Edge case: drain returns empty list (two sentinels, no output) → handler stays available."""
+    drain = tcp_handlers.SubprocessDrain(
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
+    )
+    drain._queue.put("__SUBPROCESS_DRAIN__\n")
+    drain._queue.put("__SUBPROCESS_DRAIN__\n")
+    result = drain.drain()
+    assert result == []
+    assert drain._stopped is False
+
+
 def test_drain_multiple_cycles_returns_last():
     """Edge case: drain returns only the last cycle's output when multiple cycles buffered."""
     drain = tcp_handlers.SubprocessDrain(
@@ -325,13 +337,33 @@ def test_drain_partial_output_retained_in_queue():
     # Only one sentinel — no complete pair
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
     drain._queue.put("partial output\n")  # no second sentinel yet
-    # First drain: no complete pair, raises SentinelNotFound, puts lines back
-    with pytest.raises(tcp_handlers.SentinelNotFound):
-        drain.drain()
+    # First drain: no complete pair, returns [] (no cached output), lines put back in queue
+    result = drain.drain()
+    assert result == []
     # Second sentinel arrives
     drain._queue.put("__SUBPROCESS_DRAIN__\n")
     result = drain.drain()
     assert result == ["partial output\n"]
+
+
+def test_drain_caches_output_on_timeout():
+    """Caching: when sentinel pair is found, output is cached; on subsequent timeout, cached output is returned."""
+    drain = tcp_handlers.SubprocessDrain(
+        "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=3
+    )
+    # First drain: sentinel pair found, output cached
+    drain._queue.put("__SUBPROCESS_DRAIN__\n")
+    drain._queue.put("cached output\n")
+    drain._queue.put("__SUBPROCESS_DRAIN__\n")
+    result = drain.drain()
+    assert result == ["cached output\n"]
+
+    # Second drain: no sentinel pair, returns cached output (not [])
+    drain._queue.put("no sentinel here\n")
+    result = drain.drain()
+    assert result == ["cached output\n"]
+    assert drain._consecutive_failures == 1
+    assert drain._stopped is False
 
 
 def test_max_consecutive_failures_stops_drain():
@@ -339,10 +371,10 @@ def test_max_consecutive_failures_stops_drain():
     drain = tcp_handlers.SubprocessDrain(
         "echo hello", interval=1.0, max_queue_lines=100, max_consecutive_failures=2
     )
-    # First failure
+    # First failure — returns cached output (or []), does not raise
     drain._queue.put("no sentinel here\n")
-    with pytest.raises(tcp_handlers.SentinelNotFound):
-        drain.drain()
+    result = drain.drain()
+    assert result == []
     assert drain._consecutive_failures == 1
     assert drain._stopped is False
     # Second failure — should stop the drain
@@ -351,20 +383,6 @@ def test_max_consecutive_failures_stops_drain():
         drain.drain()
     assert drain._consecutive_failures == 2
     assert drain._stopped is True
-
-
-def test_handler_empty_output_does_not_mark_unavailable():
-    """Edge case: drain returns empty list (two sentinels, no output) → handler stays available."""
-    mock_proc = MagicMock()
-    # Two sentinels with empty output between = no connections, not an error
-    mock_proc.stdout = iter(["__SUBPROCESS_DRAIN__", "__SUBPROCESS_DRAIN__", ""])
-    mock_proc.poll = MagicMock(return_value=None)
-    with patch("tcp_handlers.subprocess.Popen", return_value=mock_proc), \
-         patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
-        handler = WslTcpHandler({"polling_interval": 1.0, "wsl_monitoring": True, "wsl_command_timeout": 0.1, "max_consecutive_failures": 3, "debug": False})
-        handler.get_connections()
-        assert handler._stopped is False  # empty output is normal, not an error
-
 
 def test_tcp_connection_monitor_sleeps_remaining_time():
     """TcpConnectionMonitor sleeps only remaining time until next polling interval."""
@@ -391,3 +409,5 @@ def test_tcp_connection_monitor_sleeps_remaining_time():
             # First iteration: loop_start=0.0, get_all_conn returns at 0.1, elapsed=0.1, remaining=4.9
             # We can't easily mock time.sleep, but we can verify the logic doesn't crash
             pass  # Integration test: just verify it runs without error
+
+
