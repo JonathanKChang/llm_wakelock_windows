@@ -39,7 +39,7 @@ DEFAULTS = {
     "grace_period_minutes": 30,
     "wsl_monitoring": False,
     "wsl_docker_monitoring_max": 0,
-    "wsl_docker_discovery_interval": 60,
+    "wsl_recovery_interval": 60,
     "wsl_command_timeout": 10,
     "max_consecutive_failures": 10,
     "debug": False,

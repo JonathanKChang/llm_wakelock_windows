@@ -60,7 +60,7 @@ Edit `config.toml` in the script directory and uncomment the values you want to 
 | `grace_period_minutes` | `5.0` | How long to extend wakelock after last active connection |
 | `wsl_monitoring` | `false` | Monitor WSL2 TCP connections |
 | `wsl_docker_monitoring_max` | `0` | Max Docker containers to monitor (0 = disabled) |
-| `wsl_docker_discovery_interval` | `60` | Polling interval (seconds) for discovering Docker container changes |
+| `wsl_recovery_interval` | `60` | Subprocess restart cooldown (seconds) and Docker container discovery cadence |
 
 ### Adding a new service
 
@@ -89,7 +89,7 @@ Monitor Docker containers running inside WSL by setting `wsl_docker_monitoring_m
 wsl_docker_monitoring_max = 5  # monitor up to 5 containers
 ```
 
-> **Note:** Container discovery runs every `wsl_docker_discovery_interval` seconds. New containers are picked up automatically.
+> **Note:** Container discovery runs every `wsl_recovery_interval` seconds. New containers are picked up automatically.
 
 > **Note:** Connections are labeled `[docker:<container_id>]` in the output.
 

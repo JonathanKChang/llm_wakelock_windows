@@ -29,7 +29,7 @@ graph TB
     end
 
     subgraph Configuration["Configuration"]
-        ConfigFile["<b>config.toml</b><br/>• local/remote monitored ports<br/>• SSH port config<br/>• polling_interval<br/>• wsl_monitoring<br/>• wsl_docker_monitoring_max<br/>• wsl_command_timeout<br/>• wsl_docker_discovery_interval"]:::config
+        ConfigFile["<b>config.toml</b><br/>• local/remote monitored ports<br/>• SSH port config<br/>• polling_interval<br/>• wsl_monitoring<br/>• wsl_docker_monitoring_max<br/>• wsl_command_timeout<br/>• wsl_recovery_interval"]:::config
         Defaults["<b>DEFAULTS</b><br/>Built-in fallback values"]:::config
     end
 
