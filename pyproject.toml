@@ -1,0 +1,25 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+markers = [
+    "windows: tests that require Windows OS (skip on Linux)",
+]
+
+[tool.coverage.run]
+source = ["."]
+omit = [
+    "__pycache__/*",
+    ".venv/*",
+    "tests/*",
+    "_bmad*/**",
+    "docs/*",
+    "openspec/**",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = false
+fail_under = 70
+
+[tool.coverage.html]
+directory = "htmlcov"
