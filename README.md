@@ -116,3 +116,34 @@ python llm_wakelock_windows.py
 ```
 
 The script runs indefinitely. It prints the current time and relevant connection details whenever a wakelock is acquired.
+
+## Testing
+
+### Running tests
+
+```bash
+python -m pytest tests/ -v                    # all tests
+python -m pytest tests/ --cov=.                # with coverage (requires pytest-cov)
+python -m pytest tests/ --cov=. --cov-report=html  # HTML report in htmlcov/
+```
+
+### Test markers
+
+| Marker | Description |
+|---|---|
+| `@pytest.mark.windows` | Requires Windows OS — skipped on Linux (use `-m "windows"` to run them) |
+
+Run all tests including Windows-specific ones:
+```bash
+python -m pytest tests/ -m "windows or not windows"
+```
+
+### Mocking strategy
+
+All tests run on Linux by mocking external dependencies:
+- **Windows APIs**: `ctypes.windll.iphlpapi` and `kernel32` mocked via `MagicMock`
+- **Subprocesses**: `subprocess.Popen` and `CREATE_NO_WINDOW` patched — no real WSL/Docker calls
+- **Time**: `time.time()` and `datetime.datetime.now()` patched for timing tests
+- **Handlers**: Dependency injection pattern — mock handlers passed to `TcpConnectionMonitor` via the `handlers=` parameter
+
+No integration tests exist yet (no real WSL/Docker environments). All assertions are deterministic.
