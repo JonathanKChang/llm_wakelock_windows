@@ -1,4 +1,5 @@
 """TCP connection handlers for Windows, WSL, and Docker-in-WSL."""
+import datetime
 import subprocess
 import threading
 import time
@@ -16,33 +17,36 @@ class ConnectionSource(Enum):
     WSL_DOCKER = 2
 
 
-class SentinelNotFound(Exception):
-    """Raised when drain() gets output but no sentinel - subprocess loop broke."""
-
-
 class SubprocessDrain:
     """Persistent subprocess that runs a command in a loop, draining stdout into a queue.
+    This is done to limit the problemetic calls to wsl.exe, which can fail with any sort of system load.
 
     Constructs the loop: `echo <sentinel>; while true; do <command> || break; echo <sentinel>; sleep <interval>; done`
     drain() uses queue.get(timeout=remaining) to block-wait for new lines, scans for the last
     two sentinel occurrences, and returns lines between them.
+
+    SubprocessDrain owns its own lifecycle: detects process death, restarts automatically
+    with cooldown. No exceptions propagate to callers.
     """
 
-    def __init__(self, command: str, interval: float = 5.0, sentinel: str = "__SUBPROCESS_DRAIN__",
-                 max_queue_lines: int = 1000, timeout: float = 10.0,
-                 max_consecutive_failures: int = 3) -> None:
+    def __init__(self, command: str, config: dict | None = None,
+                 sentinel: str = "__SUBPROCESS_DRAIN__", owner: str = "subprocess") -> None:
         self._process: subprocess.Popen | None = None
-        self._queue: queue.Queue[str] = queue.Queue(maxsize=max_queue_lines)
+        self._queue: queue.Queue[str] = queue.Queue(maxsize=1000)
         self._thread: threading.Thread | None = None
         self._sentinel = sentinel
         self._command = command
-        self._stop_timeout = timeout
-        self._interval = interval
-        self._max_consecutive_failures = max_consecutive_failures
+        self._stop_timeout = config["wsl_command_timeout"]
+        self._interval = config["polling_interval"]
+        self._max_consecutive_failures = config["max_consecutive_failures"]
+        self._recovery_interval = config["wsl_recovery_interval"]
         self._consecutive_failures = 0
         self._stopped = False
         self._last_output: list[str] | None = None
-        self._full_command = f"echo {sentinel}; while true; do {command} || break; echo {sentinel}; sleep {interval}; done"
+        self._full_command = f"echo {sentinel}; while true; do {command} || break; echo {sentinel}; sleep {self._interval}; done"
+        self._owner = owner
+        self._last_restart_attempt: float = 0.0
+        self._death_warned: bool = False
 
     def start(self) -> subprocess.Popen | None:
         """Spawn the persistent subprocess and start the drain thread."""
@@ -94,10 +98,18 @@ class SubprocessDrain:
 
         Non-blocking by default (timeout=0). Drains all available lines,
         checks for the last sentinel pair, and returns lines between them.
-        Raises SentinelNotFound after max_consecutive_failures misses.
-        When sentinel pair is not found (below threshold), returns the cached
-        output from the last successful drain, or [] if no prior output exists.
+        Detects process death and handles restart automatically.
+        No exceptions propagate to callers.
         """
+        # Check for process death
+        if self._process is not None and self._process.poll() is not None:
+            if not self._death_warned:
+                print(f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} subprocess died")
+                self._death_warned = True
+            self._consecutive_failures += 1
+            self._restart_if_needed()
+            return self._last_output if self._last_output is not None else []
+
         try:
             line = self._queue.get(timeout=timeout)
             all_lines = [line]
@@ -112,6 +124,11 @@ class SubprocessDrain:
 
         pair = self._find_last_sentinel_pair(all_lines, self._sentinel)
         if pair is not None:
+            if self._death_warned:
+                print(f"[{datetime.datetime.now().isoformat()}] [INFO] {self._owner} re-established")
+                self._death_warned = False
+            elif self._consecutive_failures > 0:
+                print(f"[{datetime.datetime.now().isoformat()}] [INFO] {self._owner} restarted successfully")
             self._consecutive_failures = 0
             result = all_lines[pair[0] + 1:pair[1]]
             # Put back the second sentinel and any lines after it
@@ -125,13 +142,7 @@ class SubprocessDrain:
             self._queue.put(line)
         
         self._consecutive_failures += 1
-
-        if self._consecutive_failures >= self._max_consecutive_failures:
-            self.stop()
-            raise SentinelNotFound(f"no sentinel pair found - subprocess loop may have broken: \n  '{self._command}'")
-        
-        elif self._consecutive_failures >= self._max_consecutive_failures / 2:
-            print(f"[WARN] no sentinel pair found - failure {self._consecutive_failures} / {self._max_consecutive_failures}: \n  '{self._command}'")
+        self._restart_if_needed()
 
         return self._last_output if self._last_output is not None else []
 
@@ -139,6 +150,31 @@ class SubprocessDrain:
     def alive(self) -> bool:
         """True if the subprocess is still running."""
         return self._process is not None and self._process.poll() is None
+
+    def restart(self) -> None:
+        """Stop the current subprocess, sleep briefly, then start a new one."""
+        self.stop()
+        time.sleep(0.5)
+        self.start()
+        self._consecutive_failures = 0
+        self._stopped = False
+
+    def _restart_if_needed(self) -> None:
+        """Restart subprocess if failure threshold is met and cooldown has elapsed.
+
+        Checks max_consecutive_failures threshold and wsl_recovery_interval cooldown.
+        Only triggers once per cooldown period.
+
+        Note: does NOT print success here — the process may spawn but fail to produce
+        output until WSL/Docker are fully ready. Success is logged in drain() when
+        we first receive a valid sentinel pair after restart.
+        """
+        if (time.time() - self._last_restart_attempt) < self._recovery_interval:
+            return  # cooldown not elapsed
+
+        if self._consecutive_failures >= self._max_consecutive_failures:
+            self._last_restart_attempt = time.time()
+            self.restart()
 
     def stop(self) -> None:
         """Terminate the subprocess and wait for the drain thread."""
@@ -246,17 +282,10 @@ class WslTcpConnectionHandler(TcpConnectionSource):
     def __init__(self, config: dict, command: str) -> None:
         self._config = config
         self._stopped = False
-        self._drain = SubprocessDrain(
-            command,
-            interval=config["polling_interval"],
-            timeout=config["wsl_command_timeout"],
-            max_consecutive_failures=config["max_consecutive_failures"]
-        )
+        self._drain = SubprocessDrain(command, config, owner="WSL monitoring")
         self._debug = config["debug"]
-        self._timeout = config["wsl_command_timeout"]
         if self._drain.start() is None:
-            self._stopped = True
-            print(f"[WARN] WSL is not accessible - this container will not be monitored")
+            print(f"[WARN] WSL is not accessible - recovery attempts will be made automatically")
 
     def cleanup(self) -> None:
         """Terminate the WSL subprocess and its child process tree."""
@@ -298,26 +327,12 @@ class WslTcpConnectionHandler(TcpConnectionSource):
         """Return True only for ESTABLISHED."""
         return state_hex == WslTcpConnectionHandler.ESTABLISHED
 
-    def _on_drain_dead(self) -> None:
-        """Called when the subprocess dies. Override to suppress or customize warnings."""
-        print("[WARN] wsl.exe not available - WSL connections will not be monitored")
-
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from the subprocess."""
         if self._stopped:
             return []
-        
-        if not self._drain.alive:
-            self._stopped = True
-            self._on_drain_dead()
-            return []
 
-        try:
-            lines = self._drain.drain()
-        except SentinelNotFound:
-            self._stopped = True
-            print(f"[WARN] WSL - no sentinel found - will not monitor: \n  '{self._drain._command}'")
-            return []
+        lines = self._drain.drain()
 
         if self._debug and lines:
             print(f"  [DEBUG] {len(lines)} lines from {self._drain._full_command[:60]} ...")
@@ -341,11 +356,7 @@ class WslTcpHandler(WslTcpConnectionHandler):
     def __init__(self, config: dict) -> None:
         cmd = "cat /proc/net/tcp"
         super().__init__(config, cmd)
-
-        if self._stopped:
-            print("[WARN] WSL monitoring error")
-        else:
-            print("[INFO] WSL monitoring started")
+        print(f"[{datetime.datetime.now().isoformat()}] [INFO] WSL monitoring started")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from WSL /proc/net/tcp."""
@@ -365,17 +376,12 @@ class WslDockerTcpHandler(WslTcpConnectionHandler):
     def __init__(self, config: dict, container_id: str) -> None:
         short_id = container_id[:12]
         cmd = f"docker exec {short_id} sh -c 'cat /proc/net/tcp'"
-        super().__init__(config, cmd)
+        self._config = config
+        self._stopped = False
+        self._drain = SubprocessDrain(cmd, config, owner=f"Docker container {short_id} monitoring")
+        self._debug = config["debug"]
         self._container_id = short_id
-
-        if self._stopped:
-            print(f"[WARN] WSL-Docker {short_id} monitoring error")
-        else:
-            print(f"[INFO] WSL-Docker {short_id} monitoring started")
-
-    def _on_drain_dead(self) -> None:
-        """Container exit is expected — no warning needed."""
-        pass
+        print(f"[{datetime.datetime.now().isoformat()}] [INFO] WSL-Docker {short_id} monitoring started")
 
     def get_connections(self) -> list[dict]:
         """Get active TCP connections from Docker container."""
@@ -395,39 +401,19 @@ class WslDockerManager(TcpConnectionSource):
     def __init__(self, config: dict) -> None:
         self._config = config
         self._stopped = False
-        self._timeout = config["wsl_command_timeout"]
-        self._discovery_interval = config["wsl_docker_discovery_interval"]
         self._last_discovery_time: float = 0.0
         self._handlers: dict[str, WslDockerTcpHandler] = {}
-        self._drain = SubprocessDrain(
-            "docker ps --format '{{.ID}}'",
-            interval=self._discovery_interval,
-            timeout=config["wsl_command_timeout"],
-            max_consecutive_failures=config["max_consecutive_failures"]
-        )
+        self._drain = SubprocessDrain("docker ps --format '{{.ID}}'", config, owner="WSL-Docker lifecycle monitoring")
         self._drain.start()
         self._discover()
-
-        if self._stopped:
-            print("[WARN] WSL-Docker lifecycle monitoring error")
-        else:
-            print("[INFO] WSL-Docker lifecycle monitoring started")
+        print(f"[{datetime.datetime.now().isoformat()}] [INFO] WSL-Docker lifecycle monitoring started")
 
     def _discover(self) -> None:
-        """Drain docker ps output, handle errors, then diff against _handlers."""
+        """Drain docker ps output, then diff against _handlers."""
         if self._stopped:
             return
-        if not self._drain.alive:
-            self._stopped = True
-            print("[WARN] docker is not available - docker connections will not be monitored")
-            return
 
-        try:
-            lines = self._drain.drain()
-        except SentinelNotFound:
-            self._stopped = True
-            print(f"[WARN] no sentinel found in docker discovery - will not monitor: \n  '{self._drain._command}'")
-            return
+        lines = self._drain.drain()
         
         if not lines:
             self._last_discovery_time = time.time()
@@ -441,6 +427,8 @@ class WslDockerManager(TcpConnectionSource):
         # Remove stopped containers
         for cid in list(self._handlers):
             if cid not in current_ids:
+                short_id = self._handlers[cid]._container_id
+                print(f"[{datetime.datetime.now().isoformat()}] [INFO] Docker container {short_id} has exited, stopping monitoring")
                 self._handlers[cid].cleanup()
                 del self._handlers[cid]
 
@@ -460,8 +448,8 @@ class WslDockerManager(TcpConnectionSource):
         if self._stopped:
             return []
         # Timer-based discovery
-        if self._discovery_interval > 0 and (self._last_discovery_time == 0 or
-                time.time() - self._last_discovery_time >= self._discovery_interval):
+        if self._config["wsl_recovery_interval"] > 0 and (self._last_discovery_time == 0 or
+                time.time() - self._last_discovery_time >= self._config["wsl_recovery_interval"]):
             self._discover()
         all_conns: list[dict] = []
         for handler in self._handlers.values():
