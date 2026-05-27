@@ -1,6 +1,7 @@
 """TCP connection handlers for Windows, WSL, and Docker-in-WSL."""
 import datetime
 import subprocess
+import sys
 import threading
 import time
 import queue
@@ -48,8 +49,26 @@ class SubprocessDrain:
         self._last_restart_attempt: float = 0.0
         self._death_warned: bool = False
 
+    @staticmethod
+    def _wsl_running() -> bool:
+        """Check if any WSL distro is currently running by listing Windows processes.
+        """
+        if sys.platform != "win32": # for tests
+            return True
+        try:
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq wsl.exe", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return "wsl.exe" in result.stdout
+        except Exception:
+            return False
+
     def start(self) -> subprocess.Popen | None:
-        """Spawn the persistent subprocess and start the drain thread."""
+        """Spawn the persistent subprocess and start the drain thread.
+        """
+        if not self._wsl_running():
+            return None
         try:
             proc = subprocess.Popen(
                 ["wsl.exe", "-e", "sh", "-c", self._full_command],
@@ -64,7 +83,7 @@ class SubprocessDrain:
             self._thread.start()
             time.sleep(0.5)  # let subprocess produce initial output
             return proc
-        except (FileNotFoundError, OSError):
+        except (FileNotFoundError, OSError, AttributeError):
             return None
 
     @staticmethod
@@ -101,8 +120,14 @@ class SubprocessDrain:
         Detects process death and handles restart automatically.
         No exceptions propagate to callers.
         """
-        # Check for process death
-        if self._process is not None and self._process.poll() is not None:
+        if not self._wsl_running():
+            self._restart_if_needed()
+            return []
+
+        if self._process is None:
+            # Never tried starting
+            self.start()
+        elif self._process.poll() is not None:
             if not self._death_warned:
                 print(f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} subprocess died")
                 self._death_warned = True
