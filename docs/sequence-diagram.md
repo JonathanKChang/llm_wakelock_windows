@@ -20,21 +20,13 @@ sequenceDiagram
 
     alt wsl_monitoring enabled
         TC->>WSH: WslTcpHandler(config)
-        WSH->>DD: SubprocessDrain(command)
-        Note over WSH,DD: persistent loop: while true#59; do cat /proc/net/tcp#59; echo /proc/net/tcp#59; sleep N#59; done
+        WSH->>DD: SubprocessDrain(command, config)
     end
 
     alt wsl_docker_monitoring_max >= 1
         TC->>WD: WslDockerManager(config)
-        WD->>DD: SubprocessDrain("docker ps --format...",)
-        Note over WD,DD: persistent loop: while true#59; do docker ps#59; echo sleep N#59; done
-        WD->>DD: start()
-        DD->>OS: wsl.exe -e sh -c "while true#59; do docker ps#59; sleep N#59; done"
-        loop discovery interval
-            DD->>DD: drain() — returns lines between last 2 SENTINEL
-            DD-->>WD: container ID + name lines
-            WD->>WD: diff handlers, add new / remove stopped
-        end
+        WD->>DD: SubprocessDrain("docker ps", config)
+        DD->>OS: wsl.exe -e sh -c "while true; do docker ps; sleep N; done"
     end
 
     loop polling_interval
@@ -46,8 +38,8 @@ sequenceDiagram
         alt WSL enabled
             TC->>WSH: get_connections()
             WSH->>DD: drain()
-            DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
-            DD->>DD: scan last 2 SENTINEL, return lines between them
+            DD->>DD: queue.get(timeout=remaining) — block-wait
+            DD->>DD: scan last 2 SENTINEL, return lines
             DD-->>WSH: tcp lines
             WSH->>WSH: parse each line
             WSH-->>TC: connections
@@ -58,8 +50,8 @@ sequenceDiagram
             loop each handler in _handlers dict
                 WD->>WDC: get_connections()
                 WDC->>DD: drain()
-                DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
-                DD->>DD: scan last 2 sentinels, return lines between them
+                DD->>DD: queue.get(timeout=remaining)
+                DD->>DD: scan last 2 sentinels, return lines
                 DD-->>WDC: tcp lines
                 WDC->>WDC: parse, filter ESTABLISHED
                 WDC-->>WD: container connections
@@ -69,16 +61,66 @@ sequenceDiagram
 
         alt active connections found
             TC->>TC: _acquire() — SetThreadExecutionState
-            TC->>M: print wakelock acquired + connections
         else no active connections
             alt wakelock held
-                TC->>TC: _release() — release wakelock
-                TC->>M: print wakelock released
+                TC->>TC: _release()
             end
         end
 
         TC->>TC: sleep(polling_interval)
     end
+```
+
+## WSL Subprocess Lifecycle (Death Detection + Auto-Restart)
+
+```mermaid
+sequenceDiagram
+    participant H as Handler
+    participant DD as SubprocessDrain
+    participant Q as Queue
+    participant T as drain thread
+    participant P as subprocess
+    participant OS as WSL
+
+    H->>DD: SubprocessDrain(command, config)
+    H->>DD: start()
+    DD->>P: wsl.exe -e sh -c "<_full_command>"
+    P->>OS: runs inside WSL
+    P->>Q: stdout PIPE
+    H->>T: Thread(_drain_loop, P, Q)
+    T->>Q: lines continuously
+
+    loop polling cycle
+        H->>DD: drain()
+
+        alt process alive + sentinel pair
+            DD->>DD: queue.get() → scan sentinels
+            DD-->>H: tcp lines
+        else process dead (poll != None)
+            Note over DD,OS: subprocess died (sleep, shutdown, restart)
+            DD->>DD: log "[WARN] {owner} subprocess died"
+            DD->>DD: _restart_if_needed()
+            alt cooldown expired + failures >= threshold
+                DD->>DD: stop()
+                DD->>DD: sleep(0.5s)
+                DD->>P: start() → wsl.exe again
+                DD->>DD: log "[INFO] {owner} restarted"
+            end
+            DD-->>H: cached output or []
+        else sentinel miss
+            Note over DD: loop broke but process still alive
+            DD->>DD: increment consecutive_failures
+            DD->>DD: _restart_if_needed()
+            DD-->>H: cached output or []
+
+        alt success after restart
+            DD->>DD: log "[INFO] {owner} re-established"
+        end
+    end
+
+    H->>DD: stop()
+    DD->>P: terminate/kill
+    DD->>T: join
 ```
 
 ## Docker Container Discovery (Persistent Subprocess)
@@ -89,59 +131,24 @@ sequenceDiagram
     participant WD as WslDockerManager
     participant OS as WSL / Docker
 
-    Note over DD: Persistent loop: while true#59; do docker ps#59; sleep N#59; done
-    DD->>OS: wsl.exe -e sh -c "while true#59; do docker ps --format '{{.ID}}'#59; sleep N#59; done"
-    OS-->>DD: stdout: container line/n container lines /n ...
+    Note over DD: Persistent loop: while true; do docker ps; sleep N; done
+    DD->>OS: wsl.exe -e sh -c "while true; do docker ps; sleep N; done"
+    OS-->>DD: stdout container lines
 
     loop each polling cycle
         WD->>DD: drain()
-        DD->>DD: queue.get(timeout=remaining) — block-wait for new lines
-        DD->>DD: scan last 2 SENTINEL, return lines between them
-        DD-->>WD: ["abc123\tcontainer1", "def456\tcontainer2", ...]
+        DD->>DD: queue.get(timeout=remaining)
+        DD->>DD: scan last 2 SENTINEL, return lines
+        DD-->>WD: container ID lines
         WD->>WD: diff current_ids vs _handlers keys
         alt new container
             WD->>WDC: WslDockerTcpHandler(config, container_id)
-            WDC->>DD: SubprocessDrain.start()
-            DD->>OS: docker exec <id> sh -c "while true#59; do cat /proc/net/tcp#59; sleep N#59; done"
+            WDC->>DD: start()
+            DD->>OS: docker exec <id> sh -c "while true; do cat /proc/net/tcp; sleep N; done"
             OS-->>DD: /proc/net/tcp output
         else stopped container
             WD->>WDC: handler.cleanup()
             WDC->>DD: stop()
         end
     end
-```
-
-## WSL Subprocess Lifecycle (via SubprocessDrain)
-
-```mermaid
-sequenceDiagram
-    participant H as Handler
-    participant DD as SubprocessDrain
-    participant Q as Queue (bounded)
-    participant T as drain thread
-    participant P as subprocess
-    participant OS as WSL
-
-    H->>DD: SubprocessDrain(command)
-    Note over DD: _full_command = "echo /proc/net/tcp#59; while true#59; do cat /proc/net/tcp#59; echo /proc/net/tcp#59; sleep N#59; done"
-
-    H->>DD: start()
-    DD->>P: wsl.exe -e sh -c "<_full_command>"
-    P->>OS: runs inside WSL
-    OS-->>P: /proc/net/tcp output (repeated)
-    P->>Q: stdout PIPE
-    H->>T: Thread(target=_drain_loop, args=(P, Q), daemon=True)
-    T->>Q: puts lines into queue continuously
-
-    loop polling_interval
-        H->>DD: drain()
-        DD->>Q: queue.get(timeout=remaining) — block-wait for new lines
-        DD->>DD: scan last 2 SENTINEL, return lines between them
-        DD-->>H: tcp lines
-        H->>H: parse each line
-    end
-
-    H->>DD: stop()
-    DD->>P: terminate() / kill()
-    DD->>T: join(timeout=3)
 ```

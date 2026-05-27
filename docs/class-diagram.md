@@ -6,7 +6,7 @@ classDiagram
         <<Protocol>>
         +get_connections() list[dict]
         +cleanup() None
-        +unavailable bool
+        +_stopped bool
     }
 
     class SubprocessDrain {
@@ -15,15 +15,22 @@ classDiagram
         -_thread Thread
         -_sentinel str
         -_full_command str
+        -_stop_timeout int
         -_interval float
         -_max_consecutive_failures int
+        -_recovery_interval int
         -_consecutive_failures int
+        -_last_restart_attempt float
+        -_death_warned bool
         -_stopped bool
-        +__init__(command, interval, sentinel, max_queue_lines, max_consecutive_failures)
+        -_last_output list[str]
+        -_owner str
+        +__init__(command, config)
         +start() subprocess.Popen | None
         +drain(timeout) list[str]
         +alive bool
         +stop() None
+        +restart() None
     }
 
     class TcpConnectionMonitor {
@@ -60,18 +67,13 @@ classDiagram
         <<abstract>>
         -_config dict
         -_drain SubprocessDrain
-        -_header_seen bool
+        -_stopped bool
         -_debug bool
-        -_terminated bool
-        -_timeout int
         +__init__(config, command)
-        +_kill_process_tree(process) None
-        +_drain_output() list[str]
         +_parse_proc_net_tcp_line(line) dict | None
         +_tcp_state_is_active(state_hex) bool
         +get_connections() list[dict]
         +cleanup() None
-        +unavailable bool
     }
 
     class WslTcpHandler {
@@ -87,15 +89,14 @@ classDiagram
 
     class WslDockerManager {
         -_config dict
-        -_timeout int
-        -_discovery_interval int
+        -_stopped bool
         -_handlers dict[str, WslDockerTcpHandler]
-        -_discover_drain SubprocessDrain
+        -_drain SubprocessDrain
+        -_last_discovery_time float
         +__init__(config)
         +_discover() None
         +get_connections() list[dict]
         +cleanup() None
-        +unavailable bool
     }
 
     TcpConnectionSource <|.. WindowsTcpHandler
@@ -125,4 +126,17 @@ TcpConnectionSource (Protocol)
 │   └── WslDockerTcpHandler    — docker exec <container> /proc/net/tcp
 └── WslDockerManager           — dict-based handler tracking + persistent discovery
     └── SubprocessDrain        — shared: loop + sentinel + drain thread + queue
+```
+
+## SubprocessDrain Lifecycle
+
+`SubprocessDrain` owns its own lifecycle. When `drain()` detects process death (via `poll() != None`) or repeated sentinel misses, it automatically calls `stop()` then `restart()` (after cooldown), resetting `_consecutive_failures`. No exceptions propagate to handlers — they simply receive cached output or `[]`.
+
+```
+drain() ──► process.poll() != None ──► log death warning ──► _restart_if_needed()
+            │
+            └── sentinel miss ──► increment failures ──► _restart_if_needed()
+
+_restart_if_needed() ──► cooldown elapsed? ──► max failures met? ──► restart()
+restart() ──► stop() ──► sleep(0.5s) ──► start() ──► reset failures
 ```
