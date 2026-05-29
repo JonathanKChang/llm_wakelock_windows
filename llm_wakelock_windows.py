@@ -62,15 +62,18 @@ DEFAULTS = {
 class TcpConnectionMonitor:
     """Orchestrates connection handlers and manages the wakelock main loop."""
 
-    def __init__(self, config: dict) -> None:
+    def __init__(self, config: dict, handlers: list[TcpConnectionSource] | None = None) -> None:
         self._config = config
         self._debug = config["debug"]
 
-        self._handlers: list[TcpConnectionSource] = [WindowsTcpHandler(config)]
-        if config["wsl_monitoring"]:
-            self._handlers.append(WslTcpHandler(config))
-        if config["wsl_docker_monitoring_max"] >= 1:
-            self._handlers.append(WslDockerManager(config))
+        if handlers is not None:
+            self._handlers: list[TcpConnectionSource] = handlers
+        else:
+            self._handlers = [WindowsTcpHandler(config)]
+            if config["wsl_monitoring"]:
+                self._handlers.append(WslTcpHandler(config))
+            if config["wsl_docker_monitoring_max"] >= 1:
+                self._handlers.append(WslDockerManager(config))
         self._ssh_start_times: dict = {}
 
     @staticmethod
