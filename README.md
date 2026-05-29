@@ -1,47 +1,60 @@
-# LLM Wakelock for Windows / Generic Port Activity Wakelock
+# LLM Wakelock for Windows
+_A Generic Container-Aware Port Activity Monitor_
 
-A generic Windows tool that keeps your system awake while TCP connections on configured ports are active.
+A tool that keeps your system awake while TCP connections on configured ports are active in any container.
 
-## Versions
+## Description
 
-| Version | Description |
-|---|---|
-| **v1** | Windows-only TCP port monitoring |
-| **v2** | Added basic WSL and WSL Docker monitoring (container discovery runs once at startup) |
-| **v3** | Added full WSL Docker lifecycle monitoring |
+### Why This Exists
 
-## Why Windows?
+I can't be the only one who's repurposed a gaming Windows PC to serve LLMs, since they sit idle when not gaming. But when you're not in a late night vibe-coding session, you might want to save some energy. Manually waking and sleeping machines is a chore, while on the other end Windows / WSL doesn't grab a wakelock for active incoming ssh connections or even high computation LLM inference. Designed in a way that is easy to extend to Linux and MacOS either way.
 
-I can't be the only one who's repurposed a gaming Windows PC to serve LLMs, since they sit idle when not gaming. But when you're not in a late night vibe-coding session, you might want to save some energy. Manually waking and sleeping machines is a chore, while on the other end Windows / WSL doesn't grab a wakelock for active incoming ssh connections or even high computation LLM inference. 
+Note that Windows, WSL, and docker network stacks are all isolated at the kernel level, regardless of whther the interfaces and IPs are isolated. Additionally, calls from windows to WSL are surprisingly unreliable especially under any load, so this tool creates persistent lightweight helper processes that are resilient in order to monitor WSL and Docker container lifecycles.
 
-Designed in a way that is easy to extend to Linux and MacOS
-
-## What it does
+### What It Does
 
 - Polls the system's TCP connection table at a configured interval.
 - When an established connection is detected on any **monitored port**, it acquires a Windows wakelock (preventing sleep/hibernate).
 - When all monitored connections drop, it releases the wakelock.
 
-## Best suited for power-optimized machines
+### Energy Efficiency
 
 This tool works best on machines where you want to **optimize power usage** — letting the system sleep when idle, but keeping it awake when you need it. These common activities do not grab a wakelock and will allow Windows to sleep, whether running natively in Windows, in WSL, or in a Docker:
 - **Long agentic sessions** — local inference servers (llama.cpp, Ollama, etc.), despite using significant CPU/GPU 
 - **SSH sessions** — Active SSH sessions, incoming or outgoing.
 
-
-A typical setup:
+### A typical setup:
 
 - Windows Gaming PC
    - Serves LLM Inference
    - Hosts WSL running an agentic harness in a tmux
    - Automatically set to sleep when idle
-- Remote access - Laptop or Phone
+- Remote access - **Laptop or Phone**
    - Manually or automatically send a **Wake-on-LAN magic packet** to the PC if needed
    - Check in on the agents via SSH over tailscale
 
-### Why the SSH minimum duration?
+## Prerequisites
 
-The `ssh_min_duration` threshold (default: 30 seconds) prevents short-lived SSH connections from triggering the wakelock. For example, a `git fetch` over SSH typically completes in a few seconds — you don't want that to keep your machine awake. Only sustained SSH sessions will trigger the lock.
+- Windows (uses `iphlpapi.GetExtendedTcpTable` and `kernel32.SetThreadExecutionState`)
+- Python 3.12+
+
+## Installation
+
+Copy the following files to any directory:
+
+- `llm_wakelock_windows.py` — Main daemon script
+- `tcp_handlers.py` — TCP connection handlers
+- `config.toml` — Configuration file (optional; copy and uncomment values to override defaults)
+
+No installation or dependencies are required.
+
+## Running
+
+```bash
+python llm_wakelock_windows.py
+```
+
+The script runs indefinitely. It prints the current time and relevant connection details whenever a wakelock is acquired.
 
 ## Configuration
 
@@ -81,6 +94,11 @@ remote_ssh_ports = [22]
 
 > **Warning:** Before adding ports to `local_ssh_ports`, verify your incoming SSH TCP connection behavior. Many systems leave SSH sessions open indefinitely (depending on SSH and kernel TCP keepalive settings), which would prevent your machine from ever sleeping.
 
+#### SSH minimum duration?
+
+The `ssh_min_duration` threshold prevents short-lived SSH connections from triggering the wakelock. For example, a `git fetch` over SSH typically completes in a few seconds — you don't want that to keep your machine awake. Only sustained SSH sessions will trigger the lock.
+
+
 ### Docker container monitoring
 
 Monitor Docker containers running inside WSL by setting `wsl_docker_monitoring_max` to a positive number. The tool auto-discovers running containers via `docker ps` at startup and spawns a persistent subprocess per container to read `/proc/net/tcp`.
@@ -93,57 +111,6 @@ wsl_docker_monitoring_max = 5  # monitor up to 5 containers
 
 > **Note:** Connections are labeled `[docker:<container_id>]` in the output.
 
+## Tests
 
-## Files
-
-| File | Purpose |
-|---|---|
-| `llm_wakelock_windows.py` | Main daemon — run on Windows (config loading, main loop, wakelock management) |
-| `tcp_handlers.py` | TCP connection handlers (Windows iphlpapi, WSL, Docker-in-WSL) |
-| `config.toml` | Configuration file — copy and uncomment values to override defaults |
-| `tests/test_wakelock.py` | Core tests: SSH tracking, port matching (pure Python, runs on any platform) |
-| `docs/` | Mermaid diagrams for classes, components, and execution flow sequence |
-
-## Requirements
-
-- Windows (uses `iphlpapi.GetExtendedTcpTable` and `kernel32.SetThreadExecutionState`)
-- Python 3.12+
-
-## Running
-
-```bash
-python llm_wakelock_windows.py
-```
-
-The script runs indefinitely. It prints the current time and relevant connection details whenever a wakelock is acquired.
-
-## Testing
-
-### Running tests
-
-```bash
-python -m pytest tests/ -v                    # all tests
-python -m pytest tests/ --cov=.                # with coverage (requires pytest-cov)
-python -m pytest tests/ --cov=. --cov-report=html  # HTML report in htmlcov/
-```
-
-### Test markers
-
-| Marker | Description |
-|---|---|
-| `@pytest.mark.windows` | Requires Windows OS — skipped on Linux (use `-m "windows"` to run them) |
-
-Run all tests including Windows-specific ones:
-```bash
-python -m pytest tests/ -m "windows or not windows"
-```
-
-### Mocking strategy
-
-All tests run on Linux by mocking external dependencies:
-- **Windows APIs**: `ctypes.windll.iphlpapi` and `kernel32` mocked via `MagicMock`
-- **Subprocesses**: `subprocess.Popen` and `CREATE_NO_WINDOW` patched — no real WSL/Docker calls
-- **Time**: `time.time()` and `datetime.datetime.now()` patched for timing tests
-- **Handlers**: Dependency injection pattern — mock handlers passed to `TcpConnectionMonitor` via the `handlers=` parameter
-
-No integration tests exist yet (no real WSL/Docker environments). All assertions are deterministic.
+See [tests/README.md](tests/README.md) for full test documentation.
