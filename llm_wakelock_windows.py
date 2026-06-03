@@ -100,13 +100,18 @@ class TcpConnectionMonitor:
                 return True
         return False
     
-    def is_relevant(self,conn):
+    def _conn_source_configs(self, conn):
+        """Return (port_config, ssh_config) for a connection's source."""
+        source = conn.get("source", ConnectionSource.WINDOWS)
         return (
-            conn["local_port"] in self._config["local_monitored_ports"]
-            or conn["remote_port"] in self._config["remote_monitored_ports"]
-            or conn["local_port"] in self._config["local_ssh_ports"]
-            or conn["remote_port"] in self._config["remote_ssh_ports"]
+            self._source_port_configs[source.name.lower()],
+            self._source_ssh_configs[source.name.lower()],
         )
+
+    def is_relevant(self, conn):
+        port_config, ssh_config = self._conn_source_configs(conn)
+        return self.is_monitored_active([conn], port_config["local_ports"], port_config["remote_ports"]) or \
+               self.is_ssh_active([conn], ssh_config["local_ports"], ssh_config["remote_ports"])
 
     def is_ssh_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
         """Check if any SSH connections on the given port lists are active.
@@ -158,25 +163,8 @@ class TcpConnectionMonitor:
         return all_conns
 
     def has_active_connections(self, connections: list[dict]) -> bool:
-        """Check if the given connections list has any active monitored-port or SSH connections.
-        
-        Applies source-specific port/SSH configs: Windows connections are checked
-        against the windows config, WSL against wsl, and Docker against docker.
-        Falls back to global defaults when no per-source override is defined.
-        """
-        win_conns = [c for c in connections if c.get("source") == ConnectionSource.WINDOWS]
-        wsl_conns = [c for c in connections if c.get("source") == ConnectionSource.WSL]
-        docker_conns = [c for c in connections if c.get("source") == ConnectionSource.WSL_DOCKER]
-
-        # port config and ssh config maps: {windows, wsl, docker} -> {local_ports, remote_ports}
-        port_config = self._source_port_configs
-        ssh_config = self._source_ssh_configs
-        return (self.is_monitored_active(win_conns, port_config["windows"]["local_ports"], port_config["windows"]["remote_ports"]) or
-                self.is_monitored_active(wsl_conns, port_config["wsl"]["local_ports"], port_config["wsl"]["remote_ports"]) or
-                self.is_monitored_active(docker_conns, port_config["docker"]["local_ports"], port_config["docker"]["remote_ports"]) or
-                self.is_ssh_active(win_conns, ssh_config["windows"]["local_ports"], ssh_config["windows"]["remote_ports"]) or
-                self.is_ssh_active(wsl_conns, ssh_config["wsl"]["local_ports"], ssh_config["wsl"]["remote_ports"]) or
-                self.is_ssh_active(docker_conns, ssh_config["docker"]["local_ports"], ssh_config["docker"]["remote_ports"]))
+        """Check if the given connections list has any active monitored-port or SSH connections."""
+        return any(self.is_relevant(conn) for conn in connections)
 
     _ES_CONTINUOUS = 0x80000000
     _ES_SYSTEM_REQUIRED = 0x00000001
