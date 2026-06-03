@@ -73,7 +73,6 @@ Edit `config.toml` in the script directory and uncomment the values you want to 
 | `grace_period_minutes` | `5.0` | How long to extend wakelock after last active connection |
 | `wsl_monitoring` | `false` | Monitor WSL2 TCP connections |
 | `wsl_docker_monitoring_max` | `0` | Max Docker containers to monitor (0 = disabled) |
-| `wsl_recovery_interval` | `60` | Subprocess restart cooldown (seconds) and Docker container discovery cadence |
 
 ### Adding a new service
 
@@ -98,6 +97,25 @@ remote_ssh_ports = [22]
 
 The `ssh_min_duration` threshold prevents short-lived SSH connections from triggering the wakelock. For example, a `git fetch` over SSH typically completes in a few seconds — you don't want that to keep your machine awake. Only sustained SSH sessions will trigger the lock.
 
+### Per-source port / SSH overrides
+
+By default, all connection sources (Windows, WSL, Docker) share the same global port and SSH settings. To apply different ports to specific sources, use TOML sections:
+
+```toml
+# Global defaults — applied to all sources unless overridden
+local_monitored_ports = [8080]
+remote_monitored_ports = [11434]
+
+[wsl]
+local_monitored_ports = [5555]   # WSL only monitors local port 5555, still monitors remote port 11434
+
+[wsl_docker]
+remote_monitored_ports = [443]  # Docker containers only monitor remote port 443, still monitors remote port 11434
+```
+
+Each section supports: `local_monitored_ports`, `remote_monitored_ports`, `local_ssh_ports`, `remote_ssh_ports`. Omitted fields fall back to the global defaults.
+
+Available sections: `[windows]`, `[wsl]`, `[wsl_docker]`.
 
 ### Docker container monitoring
 

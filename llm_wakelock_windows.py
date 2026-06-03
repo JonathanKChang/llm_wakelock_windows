@@ -66,6 +66,22 @@ class TcpConnectionMonitor:
         self._config = config
         self._debug = config["debug"]
 
+        # Build per-source port/SSH configs with TOML overrides merged into globals
+        self._source_port_configs: dict[str, dict] = {
+            name: {
+                "local_ports": list(override.get("local_monitored_ports", config["local_monitored_ports"])),
+                "remote_ports": list(override.get("remote_monitored_ports", config["remote_monitored_ports"])),
+            }
+            for name, override in [("windows", config.get("windows", {})), ("wsl", config.get("wsl", {})), ("wsl_docker", config.get("wsl_docker", {}))]
+        }
+        self._source_ssh_configs: dict[str, dict] = {
+            name: {
+                "local_ports": list(override.get("local_ssh_ports", config["local_ssh_ports"])),
+                "remote_ports": list(override.get("remote_ssh_ports", config["remote_ssh_ports"])),
+            }
+            for name, override in [("windows", config.get("windows", {})), ("wsl", config.get("wsl", {})), ("wsl_docker", config.get("wsl_docker", {}))]
+        }
+
         if handlers is not None:
             self._handlers: list[TcpConnectionSource] = handlers
         else:
@@ -78,11 +94,9 @@ class TcpConnectionMonitor:
 
     @staticmethod
     def is_monitored_active(connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
-        """Check if any connection matches monitored ports (works with any source)."""
+        """Check if any connection matches the given local/remote port lists."""
         for conn in connections:
-            if conn["local_port"] in local_ports:
-                return True
-            if conn["remote_port"] in remote_ports:
+            if conn["local_port"] in local_ports or conn["remote_port"] in remote_ports:
                 return True
         return False
     
@@ -94,13 +108,15 @@ class TcpConnectionMonitor:
             or conn["remote_port"] in self._config["remote_ssh_ports"]
         )
 
-    def is_ssh_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int], min_duration: float) -> bool:
-        """Check if any SSH connections have been active for at least min_duration.
-
-        Tracks each connection by (local_addr, local_port, remote_port, remote_addr).
+    def is_ssh_active(self, connections: list[dict], local_ports: list[int], remote_ports: list[int]) -> bool:
+        """Check if any SSH connections on the given port lists are active.
+        
+        Tracks each connection by (local_addr, local_port, remote_port, remote_addr)
+        and returns True if any has been active for at least ssh_min_duration seconds.
         Prunes stale entries when a connection drops.
         """
         now = time.time()
+        min_duration = self._config["ssh_min_duration"]
         active_keys = set()
         for conn in connections:
             if conn["local_port"] in local_ports or conn["remote_port"] in remote_ports:
@@ -141,10 +157,26 @@ class TcpConnectionMonitor:
             all_conns.extend(handler.get_connections())
         return all_conns
 
-    def has_active_connections(self, connections: list[dict], config: dict) -> bool:
-        """Check if the given connections list has any active monitored-port or SSH connections."""
-        return self.is_monitored_active(connections, config["local_monitored_ports"], config["remote_monitored_ports"]) or \
-               self.is_ssh_active(connections, config["local_ssh_ports"], config["remote_ssh_ports"], config["ssh_min_duration"])
+    def has_active_connections(self, connections: list[dict]) -> bool:
+        """Check if the given connections list has any active monitored-port or SSH connections.
+        
+        Applies source-specific port/SSH configs: Windows connections are checked
+        against the windows config, WSL against wsl, and Docker against docker.
+        Falls back to global defaults when no per-source override is defined.
+        """
+        win_conns = [c for c in connections if c.get("source") == ConnectionSource.WINDOWS]
+        wsl_conns = [c for c in connections if c.get("source") == ConnectionSource.WSL]
+        docker_conns = [c for c in connections if c.get("source") == ConnectionSource.WSL_DOCKER]
+
+        # port config and ssh config maps: {windows, wsl, docker} -> {local_ports, remote_ports}
+        port_config = self._source_port_configs
+        ssh_config = self._source_ssh_configs
+        return (self.is_monitored_active(win_conns, port_config["windows"]["local_ports"], port_config["windows"]["remote_ports"]) or
+                self.is_monitored_active(wsl_conns, port_config["wsl"]["local_ports"], port_config["wsl"]["remote_ports"]) or
+                self.is_monitored_active(docker_conns, port_config["docker"]["local_ports"], port_config["docker"]["remote_ports"]) or
+                self.is_ssh_active(win_conns, ssh_config["windows"]["local_ports"], ssh_config["windows"]["remote_ports"]) or
+                self.is_ssh_active(wsl_conns, ssh_config["wsl"]["local_ports"], ssh_config["wsl"]["remote_ports"]) or
+                self.is_ssh_active(docker_conns, ssh_config["docker"]["local_ports"], ssh_config["docker"]["remote_ports"]))
 
     _ES_CONTINUOUS = 0x80000000
     _ES_SYSTEM_REQUIRED = 0x00000001
@@ -183,7 +215,7 @@ class TcpConnectionMonitor:
         while True:
             loop_start = time.time()
             all_conns = self.get_all_connections()
-            active = self.has_active_connections(all_conns, self._config)
+            active = self.has_active_connections(all_conns)
             now = datetime.datetime.now()
 
             if self._debug:

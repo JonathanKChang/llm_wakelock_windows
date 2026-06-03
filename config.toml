@@ -1,9 +1,11 @@
 # Configuration for llm_wakelock_windows.py
 #
 # This file is optional. If it does not exist, or if a value is commented out,
-# the built-in default is used, shown commented out below for reference.
-#
-# To override a default, uncomment the line and change the value.
+# the built-in default is used.
+# Global values apply to all connection sources unless overridden by per-source
+# sections ([windows], [wsl], [wsl_docker]) below.
+
+# ── Global defaults (used for all sources unless overridden) ──────────────────
 
 # Ports monitored with instant detection (any established connection counts).
 # local_monitored_ports = [8080, 11434]
@@ -25,24 +27,43 @@
 # grace_period_minutes = 30
 
 # Enable monitoring of WSL2 TCP connections via /proc/net/tcp.
-# When enabled, the same port/SSH config applies to both Windows and WSL2 connections.
 # wsl_monitoring = false
 
 # Number of Docker containers to monitor in WSL (0 = disabled).
-# Containers are auto-discovered via docker ps at startup.
-# New containers started after the daemon begins are NOT picked up.
 # wsl_docker_monitoring_max = 0
 
 # Number of seconds to wait for WSL.exe commands
-# WSL.exe interface can be unresponsive on light load
-# Even when the container is responsive to existing processes
 # wsl_command_timeout = 10
 
 # Number of allowed consecutive polls without output from
-# the WSL/Docker tcp subprocess monitor.
-# If the system is under high load or WSL is resource constrained,
-# periods of delayed output are expected
+# the WSL/Docker tcp monitor helper process.
 # max_consecutive_failures = 10
+
+# WSL/Docker helper process restart cooldown (seconds) and
+# Docker container discovery cadence.
+# wsl_recovery_interval = 60
 
 # Enable debug-level logging (prints all connections each poll).
 # debug = false
+
+# ── Per-source port / SSH overrides ───────────────────────────────────────────
+# Each section below is optional. Omitted fields fall back to the global
+# defaults defined above. Uncomment and set only what you want to change.
+
+# [windows]
+# local_monitored_ports = []
+# remote_monitored_ports = []
+# local_ssh_ports = []
+# remote_ssh_ports = []
+
+# [wsl]
+# local_monitored_ports = []
+# remote_monitored_ports = []
+# local_ssh_ports = []
+# remote_ssh_ports = []
+
+# [wsl_docker]
+# local_monitored_ports = []
+# remote_monitored_ports = []
+# local_ssh_ports = []
+# remote_ssh_ports = []

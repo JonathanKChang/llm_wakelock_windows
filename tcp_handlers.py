@@ -127,19 +127,18 @@ class SubprocessDrain:
         if self._process is None:
             self.start()
         elif self._process.poll() is not None:
-            # Process death — tracked separately from sentinel misses
             if not self._death_warned:
                 print(f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} subprocess died")
                 self._death_warned = True
             self._restart_if_needed()
             return self._last_output if self._last_output is not None else []
 
-        # Get only currently available lines (non-blocking)
-        try:
-            line = self._queue.get_nowait()
-            all_lines = [line]
-        except queue.Empty:
-            all_lines = []
+        all_lines = []
+        while True:
+            try:
+                all_lines.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
 
         pair = self._find_last_sentinel_pair(all_lines, self._sentinel)
         if pair is not None:
@@ -154,7 +153,7 @@ class SubprocessDrain:
             self._last_output = result
             return result
 
-        # No pair found — subprocess loop broke or is slow. Count as failure.
+        # No pair found — subprocess loop broke or is slow. Put back all consumed lines
         for line in all_lines:
             self._queue.put(line)
 
@@ -163,7 +162,7 @@ class SubprocessDrain:
         if self._max_consecutive_failures > 2 and self._consecutive_failures == (self._max_consecutive_failures + 1) // 2:
             print(
                 f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} "
-                f"missed {self._consecutive_failures}/{self._max_consecutive_failures} sentinels in a row"
+                f"missed {self._consecutive_failures}/{self._max_consecutive_failures} polls"
             )
         self._restart_if_needed()
 
@@ -193,7 +192,7 @@ class SubprocessDrain:
         if self._consecutive_failures >= self._max_consecutive_failures:
             print(
                 f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} "
-                f"restarting after {self._consecutive_failures} missed sentinels"
+                f"restarting after {self._consecutive_failures} missed polls"
             )
             self._last_restart_attempt = time.time()
             self.restart()
