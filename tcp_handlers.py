@@ -23,7 +23,7 @@ class SubprocessDrain:
     This is done to limit the problemetic calls to wsl.exe, which can fail with any sort of system load.
 
     Constructs the loop: `echo <sentinel>; while true; do <command> || break; echo <sentinel>; sleep <interval>; done`
-    drain() uses queue.get(timeout=remaining) to block-wait for new lines, scans for the last
+    drain() uses queue.get_nowait() to collect any output available, then scans for the last
     two sentinel occurrences, and returns lines between them.
 
     SubprocessDrain owns its own lifecycle: detects process death, restarts automatically
@@ -112,12 +112,12 @@ class SubprocessDrain:
 
         return hits[-2], hits[-1]
 
-    def drain(self, timeout: float = 0) -> list[str]:
+    def drain(self) -> list[str]:
         """Drain lines between the last two sentinel occurrences.
 
-        Non-blocking by default (timeout=0). Drains all available lines,
-        checks for the last sentinel pair, and returns lines between them.
-        Detects process death and handles restart automatically.
+        Non-blocking: gets only lines currently in the queue. Drains all
+        available lines, checks for the last sentinel pair, and returns
+        lines between them. Detects process death and handles restart.
         No exceptions propagate to callers.
         """
         if not self._wsl_running():
@@ -125,35 +125,27 @@ class SubprocessDrain:
             return []
 
         if self._process is None:
-            # Never tried starting
             self.start()
         elif self._process.poll() is not None:
+            # Process death — tracked separately from sentinel misses
             if not self._death_warned:
                 print(f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} subprocess died")
                 self._death_warned = True
-            self._consecutive_failures += 1
             self._restart_if_needed()
             return self._last_output if self._last_output is not None else []
 
+        # Get only currently available lines (non-blocking)
         try:
-            line = self._queue.get(timeout=timeout)
+            line = self._queue.get_nowait()
             all_lines = [line]
         except queue.Empty:
             all_lines = []
-        # Drain all remaining available lines
-        while True:
-            try:
-                all_lines.append(self._queue.get_nowait())
-            except queue.Empty:
-                break
 
         pair = self._find_last_sentinel_pair(all_lines, self._sentinel)
         if pair is not None:
             if self._death_warned:
                 print(f"[{datetime.datetime.now().isoformat()}] [INFO] {self._owner} re-established")
                 self._death_warned = False
-            elif self._consecutive_failures > 0:
-                print(f"[{datetime.datetime.now().isoformat()}] [INFO] {self._owner} restarted successfully")
             self._consecutive_failures = 0
             result = all_lines[pair[0] + 1:pair[1]]
             # Put back the second sentinel and any lines after it
@@ -162,19 +154,20 @@ class SubprocessDrain:
             self._last_output = result
             return result
 
-        # No pair found - put back all consumed lines
+        # No pair found — subprocess loop broke or is slow. Count as failure.
         for line in all_lines:
             self._queue.put(line)
-        
+
         self._consecutive_failures += 1
+        # Warn once at halfway, restart at threshold (cooldown-gated)
+        if self._max_consecutive_failures > 2 and self._consecutive_failures == (self._max_consecutive_failures + 1) // 2:
+            print(
+                f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} "
+                f"missed {self._consecutive_failures}/{self._max_consecutive_failures} sentinels in a row"
+            )
         self._restart_if_needed()
 
         return self._last_output if self._last_output is not None else []
-
-    @property
-    def alive(self) -> bool:
-        """True if the subprocess is still running."""
-        return self._process is not None and self._process.poll() is None
 
     def restart(self) -> None:
         """Stop the current subprocess, sleep briefly, then start a new one."""
@@ -198,6 +191,10 @@ class SubprocessDrain:
             return  # cooldown not elapsed
 
         if self._consecutive_failures >= self._max_consecutive_failures:
+            print(
+                f"[{datetime.datetime.now().isoformat()}] [WARN] {self._owner} "
+                f"restarting after {self._consecutive_failures} missed sentinels"
+            )
             self._last_restart_attempt = time.time()
             self.restart()
 

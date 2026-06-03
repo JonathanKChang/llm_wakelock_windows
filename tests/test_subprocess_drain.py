@@ -67,8 +67,8 @@ class TestLifecycleStart:
         # start() should have been called
         assert mock_popen.called
 
-    def test_alive_property_true_while_running(self):
-        """alive is True when process.poll() returns None."""
+    def test_stop_sets_stopped_flag(self):
+        """stop() sets _stopped and halts the subprocess."""
         drain = _make_drain()
         with patch.object(SubprocessDrain, "_wsl_running", return_value=True), \
              patch("tcp_handlers.subprocess.Popen") as mock_popen, \
@@ -77,19 +77,6 @@ class TestLifecycleStart:
             mock_proc.poll.return_value = None
             mock_popen.return_value = mock_proc
             drain._process = mock_proc
-        assert drain.alive is True
-
-    def test_alive_property_false_after_stop(self):
-        """alive is False after the process has terminated."""
-        drain = _make_drain()
-        with patch.object(SubprocessDrain, "_wsl_running", return_value=True), \
-             patch("tcp_handlers.subprocess.Popen") as mock_popen, \
-             patch.object(tcp_handlers.subprocess, "CREATE_NO_WINDOW", 0, create=True):
-            mock_proc = MagicMock()
-            mock_proc.poll.return_value = None
-            mock_popen.return_value = mock_proc
-            drain._process = mock_proc
-        assert drain.alive is True
         drain.stop()
         assert drain._stopped is True
 
