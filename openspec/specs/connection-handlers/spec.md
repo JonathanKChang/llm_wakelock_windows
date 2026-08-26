@@ -1,80 +1,72 @@
+## Purpose
+
+Provides a unified interface for gathering and analyzing TCP connections across Windows and WSL2 environments, with utilities to detect monitored ports, track SSH sessions, and format connection data consistently.
+
 ## Requirements
 
-### Requirement: TcpConnectionSource protocol
-The system SHALL define a `TcpConnectionSource` Protocol with a `get_connections() -> list[dict]` method. Both Windows and WSL2 connection sources SHALL implement this Protocol. Each connection dict MUST contain: `state`, `local_addr`, `local_port`, `remote_addr`, `remote_port`, `is_wsl2`.
+### Requirement: Connection source abstraction
+The system SHALL define a common interface for retrieving TCP connections from different platforms. Each source returns connection records containing state, local address, local port, remote address, remote port, and a source identifier distinguishing Windows from WSL2.
 
-#### Scenario: Windows handler implements the protocol
-- **WHEN** `WindowsTcpHandler` is instantiated and `get_connections()` is called
-- **THEN** it returns a list of dicts with `is_wsl2=False` for each established TCP connection
+#### Scenario: Windows source returns Windows-tagged connections
+- **WHEN** the Windows connection source is queried
+- **THEN** each returned record has the source identifier set to Windows
 
-#### Scenario: WSL2 handler implements the protocol
-- **WHEN** `Wsl2TcpHandler` is instantiated and `get_connections()` is called
-- **THEN** it returns a list of dicts with `is_wsl2=True` for each established TCP connection
+#### Scenario: WSL2 source returns WSL2-tagged connections
+- **WHEN** the WSL2 connection source is queried
+- **THEN** each returned record has the source identifier set to WSL2
 
-### Requirement: Unified monitored connection detection
-The system SHALL have a single `is_monitored_active(connections, local_ports, remote_ports)` function that checks if any connection in a list has a local or remote port matching the monitored port lists. It SHALL work with connection dicts from any source.
+### Requirement: Monitored port detection
+The system SHALL determine whether any active connection matches a provided list of monitored ports, checking both local and remote ports against those lists.
 
-#### Scenario: Monitored local port detected
-- **WHEN** a connection has `local_port` in the monitored list
-- **THEN** `is_monitored_active` returns `True`
+#### Scenario: Local port match is detected
+- **WHEN** a connection's local port appears in the monitored list
+- **THEN** the system reports that a monitored connection is active
 
-#### Scenario: Monitored remote port detected
-- **WHEN** a connection has `remote_port` in the monitored list
-- **THEN** `is_monitored_active` returns `True`
+#### Scenario: Remote port match is detected
+- **WHEN** a connection's remote port appears in the monitored list
+- **THEN** the system reports that a monitored connection is active
 
 #### Scenario: No monitored ports match
-- **WHEN** no connection has a matching local or remote port
-- **THEN** `is_monitored_active` returns `False`
+- **WHEN** no connection has a local or remote port in the monitored lists
+- **THEN** the system reports that no monitored connections are active
 
-### Requirement: Unified SSH active detection
-The system SHALL have a single `is_ssh_active(connections, ssh_start_times, local_ssh_ports, remote_ssh_ports, min_duration)` function that tracks SSH session durations. The SSH key SHALL be `(local_port, remote_port, remote_addr)` — no PID. Stale entries are pruned when connections drop.
+### Requirement: SSH session tracking
+The system SHALL track SSH sessions by their port and remote address, detecting when a session has been active long enough to be considered established, and pruning stale entries when connections drop.
 
-#### Scenario: SSH session exceeds minimum duration
-- **WHEN** an SSH connection has been tracked for at least `min_duration` seconds
-- **THEN** `is_ssh_active` returns `True`
+#### Scenario: Established SSH connection is reported
+- **WHEN** an SSH session has been active for at least the minimum duration
+- **THEN** the system reports that SSH is active
 
-#### Scenario: SSH session below minimum duration
-- **WHEN** an SSH connection was recently established (less than `min_duration` seconds)
-- **THEN** `is_ssh_active` returns `False`
+#### Scenario: New SSH connection is not yet established
+- **WHEN** an SSH session was just established and has not yet met the minimum duration
+- **THEN** the system reports that SSH is not active
 
-#### Scenario: Stale SSH entry is pruned
-- **WHEN** an SSH connection drops and no longer appears in the connection list
-- **THEN** its tracking entry is removed from `ssh_start_times`
+#### Scenario: Stale session entry is cleaned up
+- **WHEN** an SSH connection terminates and no longer appears in the connection list
+- **THEN** its tracking entry is removed
 
-#### Scenario: Reconnected SSH with same ports resets timer
-- **WHEN** a previous SSH key was pruned and a new connection with the same ports appears
-- **THEN** the timer starts fresh (treated as new session)
+### Requirement: Connection formatting
+The system SHALL format a list of connection records into human-readable strings, with each connection showing the local and remote address pairs, optionally prefixed with a source label.
 
-### Requirement: Unified connection formatting for logging
-The system SHALL have a single `format_active_connections(connections, show_wsl2_label=True)` function that formats a list of active connection dicts into human-readable strings for logging. When `show_wsl2_label` is True, connections with `is_wsl2=True` are prefixed with `[wsl2]` and others with `[win]`.
+#### Scenario: Windows connections labeled
+- **WHEN** a Windows connection is formatted with source labels
+- **THEN** the output is prefixed with "[win]"
 
-#### Scenario: Format Windows connections with labels
-- **WHEN** `format_active_connections` is called with Windows connections and `show_wsl2_label=True`
-- **THEN** each connection is prefixed with `[win]`
+#### Scenario: WSL2 connections labeled
+- **WHEN** a WSL2 connection is formatted with source labels
+- **THEN** the output is prefixed with "[wsl2]"
 
-#### Scenario: Format WSL2 connections with labels
-- **WHEN** `format_active_connections` is called with WSL2 connections and `show_wsl2_label=True`
-- **THEN** each connection is prefixed with `[wsl2]`
+#### Scenario: No source label
+- **WHEN** connections are formatted without source labels
+- **THEN** no prefix is added to the output
 
-#### Scenario: Format without labels
-- **WHEN** `show_wsl2_label=False`
-- **THEN** no source prefix is added
+### Requirement: Subprocess auto-recovery
+The system SHALL continue monitoring even when a platform subprocess terminates (due to shutdown, crash, or pipe closure), by delegating recovery to an internal manager that automatically restarts the subprocess.
 
-### Requirement: Handler encapsulation
-The system SHALL encapsulate all Windows TCP table retrieval in a `WindowsTcpHandler` class and all WSL2 TCP polling in a `WslTcpHandler` class. The main loop SHALL call `handler.get_connections()` through the shared Protocol interface. When a WSL subprocess dies (WSL shutdown, crash, or pipe EOF), the handler SHALL NOT permanently stop monitoring; instead it SHALL continue calling `SubprocessDrain.drain()` which manages subprocess auto-restart internally. Handlers SHALL pass an owner string to SubprocessDrain for contextual logging (e.g., "WSL /proc/net/tcp").
-
-#### Scenario: Main loop uses handler interface
-- **WHEN** the main loop needs connections
-- **THEN** it calls `windows_handler.get_connections()` and optionally `wsl2_handler.get_connections()` if enabled
-
-#### Scenario: WSL2 handler is disabled
-- **WHEN** `enable_wsl2_monitoring` is `False`
-- **THEN** `Wsl2TcpHandler` is not instantiated and no WSL2 subprocess is spawned
-
-#### Scenario: Handler continues monitoring after subprocess dies
-- **WHEN** a WSL subprocess terminates (e.g., `wsl --shutdown`)
-- **THEN** the handler does not permanently stop; it continues calling `drain()` which auto-restarts the subprocess
+#### Scenario: Monitoring survives subprocess death
+- **WHEN** a WSL2 subprocess terminates unexpectedly
+- **THEN** the handler does not permanently stop; it continues monitoring after the subprocess recovers
 
 #### Scenario: Docker container handlers recover independently
-- **WHEN** a Docker container exits or its subprocess dies
-- **THEN** the individual `WslDockerTcpHandler` for that container auto-recovers via SubprocessDrain; the `WslDockerManager` continues monitoring other containers
+- **WHEN** one Docker container exits or its monitoring subprocess dies
+- **THEN** that container's handler recovers independently while other containers continue being monitored

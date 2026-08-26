@@ -1,110 +1,110 @@
+## Purpose
+
+Enables monitoring of TCP connections inside WSL2 by deploying and maintaining a persistent helper process, parsing raw TCP state data, and providing automatic recovery when WSL2 becomes temporarily unavailable.
+
 ## Requirements
 
 ### Requirement: WSL2 monitoring toggle
-The system SHALL support an `enable_wsl2_monitoring` configuration option that controls whether WSL2 connections are monitored. When WSL2 is not installed, not running, or `wsl.exe` is not found and monitoring is enabled, the system SHALL log a warning with timestamp and owner name, then continue retrying on each poll cycle without crashing. Windows-only monitoring continues normally using the existing port/SSH config.
+The system SHALL support an on/off configuration that controls whether WSL2 connections are monitored. When enabled but WSL2 is unavailable (not installed, not running, or the executable is missing), the system logs a warning and continues retrying on each poll cycle without crashing. Windows-only monitoring proceeds unaffected.
 
-#### Scenario: WSL2 monitoring enabled
-- **WHEN** `enable_wsl2_monitoring` is set to `true` in config.toml and WSL2 is available
+#### Scenario: WSL2 monitoring enabled and available
+- **WHEN** the toggle is true and WSL2 is present
 - **THEN** the monitor queries WSL2 TCP connections on each poll cycle
-- **AND** the existing `local_monitored_ports`, `remote_monitored_ports`, `local_ssh_ports`, and `remote_ssh_ports` apply to WSL2 connections in addition to Windows connections
 
 #### Scenario: WSL2 monitoring disabled
-- **WHEN** `enable_wsl2_monitoring` is set to `false` or is not set in config.toml
-- **THEN** the monitor does not query WSL2 connections
+- **WHEN** the toggle is false or absent
+- **THEN** no WSL2 connections are queried
 
-#### Scenario: WSL2 monitoring enabled but WSL2 unavailable logs warning
-- **WHEN** `enable_wsl2_monitoring` is `true` but WSL2 is not installed, not running, or `wsl.exe` is not found
-- **THEN** the monitor logs a warning once with timestamp and handler owner name, then continues retrying on each poll cycle
+#### Scenario: WSL2 unavailable logs warning
+- **WHEN** the toggle is true but WSL2 cannot be reached
+- **THEN** a warning is logged and the monitor continues retrying on subsequent polls
 
-#### Scenario: WSL2 becomes temporarily unavailable recovers automatically
-- **WHEN** WSL2 becomes unavailable (e.g., WSL shutting down) during a poll
-- **THEN** the monitor detects the subprocess death, logs a warning with timestamp, and automatically restarts the subprocess when `wsl_recovery_interval` cooldown has elapsed
+#### Scenario: Temporary unavailability recovers
+- **WHEN** WSL2 was available, becomes unavailable, then comes back
+- **THEN** the monitor detects the disruption, logs a warning, and resumes monitoring after recovery
 
-### Requirement: Persistent WSL2 subprocess for TCP monitoring
-The system SHALL maintain a persistent subprocess inside WSL2 that reads `/proc/net/tcp` and writes one line per connection to stdout.
+### Requirement: Persistent TCP state subprocess
+The system SHALL maintain a long-running process inside WSL2 that reads the kernel's TCP connection table and emits one line per connection to its output stream. This process survives across polls.
 
-#### Scenario: Subprocess starts successfully
-- **WHEN** the monitor starts, `enable_wsl2_monitoring` is `true`, and WSL2 is available
-- **THEN** the system spawns a persistent `wsl.exe -e bash ~/bin/wsl2_tcp_monitor.sh` subprocess
-- **AND** the subprocess reads `/proc/net/tcp` and writes connection lines to stdout
+#### Scenario: Subprocess starts on initialization
+- **WHEN** WSL2 monitoring is enabled and WSL2 is available
+- **THEN** a persistent subprocess is spawned inside WSL2
 
-#### Scenario: Subprocess dies
-- **WHEN** the subprocess exits (crash, WSL restart, or pipe EOF)
-- **THEN** the system detects the death on the next poll cycle
-- **AND** automatically restarts a new subprocess
+#### Scenario: Subprocess dies and recovers
+- **WHEN** the subprocess terminates unexpectedly
+- **THEN** the system detects the death and spawns a replacement on the next poll
 
-### Requirement: TCP connection parsing in Python
-The system SHALL parse `/proc/net/tcp` output lines in Python, extracting local port, remote port, and TCP state.
+### Requirement: TCP state parsing
+The system SHALL parse the kernel TCP connection table output, extracting local port, remote port, and connection state for each line. It SHALL skip header lines and gracefully handle malformed entries by logging a warning and continuing.
 
-#### Scenario: Parse established connection
-- **WHEN** a line like `0: 00000000:1F90 0500000A:1F40 0A ...` is received
-- **THEN** the system extracts local_port = 8080 (0x1F90), remote_port = 8000 (0x1F40), state = ESTABLISHED (0x0A)
+#### Scenario: Valid connection line is parsed correctly
+- **WHEN** a well-formed TCP state line is received
+- **THEN** the local port, remote port, and connection state are extracted accurately
 
-#### Scenario: Parse header line
-- **WHEN** the first line of `/proc/net/tcp` output (containing "local_address") is received
-- **THEN** the system skips it and does not treat it as a connection
+#### Scenario: Header line is skipped
+- **WHEN** the output contains a header row
+- **THEN** it is ignored and does not produce a connection record
 
-#### Scenario: Parse malformed line
-- **WHEN** a line that does not match the expected format is received
-- **THEN** the system logs a warning and skips the line without crashing
+#### Scenario: Malformed line is handled gracefully
+- **WHEN** a line does not match the expected format
+- **THEN** a warning is logged and parsing continues with remaining lines
 
-### Requirement: WSL2 helper script deployment
-The system SHALL deploy a bash helper script to WSL2 on first startup if not already present.
+### Requirement: Helper script deployment
+On first startup, the system SHALL deploy a helper script into WSL2 if one is not already present. If a script already exists, it is used as-is without modification.
 
-#### Scenario: Helper script not present
-- **WHEN** the monitor starts, `enable_wsl2_monitoring` is `true`, and the helper script is not found in WSL2
-- **THEN** the monitor creates `~/bin/wsl2_tcp_monitor.sh` inside WSL2 via `wsl.exe`
-- **AND** the script contains `cat /proc/net/tcp`
+#### Scenario: Script deployed on first run
+- **WHEN** the helper script does not exist in WSL2
+- **THEN** the system creates it before starting the subprocess
 
-#### Scenario: Helper script already present
-- **WHEN** the monitor starts, `enable_wsl2_monitoring` is `true`, and `~/bin/wsl2_tcp_monitor.sh` already exists in WSL2
-- **THEN** the monitor uses the existing script without modification
+#### Scenario: Existing script is reused
+- **WHEN** the helper script already exists in WSL2
+- **THEN** no new script is created; the existing one is used
 
-### Requirement: Shared port/SSH config for Windows and WSL2
-The system SHALL use the same port and SSH configuration for both Windows and WSL2 connections when WSL2 monitoring is enabled.
+### Requirement: Shared port and SSH configuration
+When WSL2 monitoring is enabled, WSL2 connections use the same monitored port lists and SSH port lists as Windows connections. If no ports are configured, WSL2 connections are queried but produce no wakelock-triggering matches.
 
-#### Scenario: Port match on WSL2 connection
-- **WHEN** a WSL2 connection's local or remote port matches a port in `local_monitored_ports` or `remote_monitored_ports`
-- **THEN** the connection counts as active and contributes to wakelock acquisition
+#### Scenario: WSL2 port match triggers wakelock
+- **WHEN** a WSL2 connection's local or remote port matches a configured monitored port
+- **THEN** the connection counts as active for wakelock purposes
 
-#### Scenario: SSH match on WSL2 connection
-- **WHEN** a WSL2 connection's local or remote port matches a port in `local_ssh_ports` or `remote_ssh_ports`
-- **THEN** the connection is tracked for SSH duration and contributes to wakelock after `ssh_min_duration`
+#### Scenario: WSL2 SSH match tracks session
+- **WHEN** a WSL2 connection matches an SSH port
+- **THEN** it is tracked for minimum duration and contributes to wakelock after the threshold
 
-#### Scenario: No WSL2 ports configured
-- **WHEN** the existing port lists are empty and WSL2 monitoring is enabled
-- **THEN** WSL2 connections are queried but none match, so they do not trigger wakelock
+#### Scenario: No ports configured
+- **WHEN** monitored port lists are empty
+- **THEN** WSL2 connections are collected but do not trigger wakelock acquisition
 
-### Requirement: Subprocess auto-restart with cooldown and logging
-The `SubprocessDrain` class SHALL manage its own subprocess lifecycle including automatic restart on process death or sentinel failure threshold. When the subprocess dies (detected via `poll() != None`), `SubprocessDrain` SHALL log a warning with an ISO timestamp, owner name, and the `wsl_recovery_interval` cooldown value. After `max_consecutive_failures` sentinel misses (default: 10) or process death, and after at least `wsl_recovery_interval` seconds have elapsed since the last restart attempt, `SubprocessDrain` SHALL restart the subprocess (terminate old, spawn new) and reset the consecutive failure counter on successful start. On successful recovery producing fresh data, `SubprocessDrain` SHALL log an info message with timestamp and owner name. The owner string is injected at construction time (e.g., "WSL /proc/net/tcp", "Docker container abc123").
+### Requirement: Subprocess auto-restart with cooldown
+When a subprocess dies or fails to produce valid output for N consecutive attempts (where N is the failure threshold), the system SHALL restart it after a configurable cooldown interval. Upon successful recovery, an info-level log is emitted. Silent accumulation of failures does not produce per-failure log spam.
 
-#### Scenario: Process death logs warning with timestamp and owner
-- **WHEN** the subprocess process has terminated
-- **THEN** `SubprocessDrain` logs a warning: `[YYYY-MM-DD HH:MM:SS] [WARN] <owner> process died — retrying in 60s`
+#### Scenario: Process death logs warning
+- **WHEN** the subprocess terminates
+- **THEN** a warning is logged with the owner name and cooldown value
 
-#### Scenario: Successful restart logs info message
-- **WHEN** the subprocess terminates and a new subprocess successfully starts
-- **THEN** `SubprocessDrain` logs an info message: `[YYYY-MM-DD HH:MM:SS] [INFO] <owner> restarted successfully`
+#### Scenario: Successful restart logs info
+- **WHEN** a restarted subprocess begins producing valid output
+- **THEN** an informational message confirms the restart
 
-#### Scenario: Fresh data after recovery logs re-established
-- **WHEN** the subprocess has been restarted and the next successful drain finds a sentinel pair
-- **THEN** `SubprocessDrain` logs an info message: `[YYYY-MM-DD HH:MM:SS] [INFO] <owner> re-established`
+#### scenario: Fresh data after recovery logs re-established
+- **WHEN** new connection data arrives after a recovery
+- **THEN** an informational message indicates the connection stream was re-established
 
-#### Scenario: Sentinel misses accumulate without spamming logs
-- **WHEN** the subprocess is alive but failing to produce sentinel markers (e.g., WSL load, slow commands)
-- **THEN** `SubprocessDrain` increments the consecutive failure counter silently until the threshold triggers restart; no per-miss logging
+#### Scenario: Silent failure counting
+- **WHEN** the subprocess produces output without expected delimiters
+- **THEN** the failure counter increments silently without logging each miss
 
-#### Scenario: Restart cooldown prevents rapid retries
-- **WHEN** a subprocess restart fails (WSL still unavailable)
-- **THEN** the next restart attempt waits at least `wsl_recovery_interval` seconds before retrying
+#### Scenario: Cooldown prevents rapid retries
+- **WHEN** a restart attempt fails
+- **THEN** the next attempt waits at least the configured cooldown interval
 
-### Requirement: Discovery and recovery interval config
-The system SHALL use a `wsl_recovery_interval` configuration parameter (default: 60 seconds, replaces the previous `wsl_docker_discovery_interval`) to control both the subprocess restart cooldown in `SubprocessDrain` and the Docker container discovery cadence in `WslDockerManager`.
+### Requirement: Unified recovery interval
+The system SHALL use a single configuration parameter for both subprocess restart cooldown and Docker container discovery interval, eliminating the need for separate timing settings. The default value is 60 seconds.
 
-#### Scenario: Default interval is 60 seconds
-- **WHEN** `wsl_recovery_interval` is not specified in config
-- **THEN** the default value is 60 seconds
+#### Scenario: Default recovery interval
+- **WHEN** no custom interval is configured
+- **THEN** the default of 60 seconds is used for both subprocess restart cooldown and discovery
 
-#### Scenario: Discovery uses same interval as restart cooldown
-- **WHEN** `WslDockerManager` determines when to run docker ps discovery
-- **THEN** it uses `wsl_recovery_interval` as the time between discovery cycles
+#### Scenario: Custom interval applies to both
+- **WHEN** a custom interval (e.g., 120 seconds) is configured
+- **THEN** both subprocess recovery and container discovery use that value
